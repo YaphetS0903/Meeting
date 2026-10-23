@@ -1,0 +1,112 @@
+services:
+  backend:
+    image: meeting-actions-app:local
+    pull_policy: never
+    build: ./backend
+    user: "${APP_UID:-10001}:${APP_GID:-10001}"
+    environment:
+      <<: &app-env
+        DATABASE_URL: postgresql+psycopg://meetings:${POSTGRES_PASSWORD:-meetings}@postgres:5432/meetings
+        REDIS_URL: redis://redis:6379/0
+        STORAGE_DIR: /app/storage
+        JWT_SECRET: ${JWT_SECRET:?请在 .env 配置独立随机 JWT_SECRET}
+        APP_ENV: ${APP_ENV:-production}
+        PUBLIC_URL: ${PUBLIC_URL:-http://localhost:8086}
+        WECOM_CORP_ID: ${WECOM_CORP_ID:-}
+        WECOM_AGENT_ID: ${WECOM_AGENT_ID:-}
+        WECOM_SECRET: ${WECOM_SECRET:-}
+        SMTP_HOST: ${SMTP_HOST:-}
+        SMTP_PORT: ${SMTP_PORT:-587}
+        SMTP_USERNAME: ${SMTP_USERNAME:-}
+        SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+        SMTP_FROM: ${SMTP_FROM:-}
+        SMTP_STARTTLS: ${SMTP_STARTTLS:-true}
+        SMTP_SSL: ${SMTP_SSL:-false}
+        AI_BASE_URL: ${AI_BASE_URL:-}
+        AI_API_KEY: ${AI_API_KEY:-}
+        AI_MODEL: ${AI_MODEL:-}
+        AI_TIMEOUT_SECONDS: ${AI_TIMEOUT_SECONDS:-90}
+        NATIVE_TODO_ENABLED: ${NATIVE_TODO_ENABLED:-false}
+        NATIVE_TODO_DIRECT_ENABLED: ${NATIVE_TODO_DIRECT_ENABLED:-true}
+        NATIVE_TODO_MEETING_ENABLED: ${NATIVE_TODO_MEETING_ENABLED:-false}
+        NATIVE_TODO_ALL_ACTIVE_USERS: ${NATIVE_TODO_ALL_ACTIVE_USERS:-false}
+        NATIVE_TODO_APP_ENABLED: ${NATIVE_TODO_APP_ENABLED:-false}
+        WECOM_DIRECT_NOTIFICATIONS_ENABLED: ${WECOM_DIRECT_NOTIFICATIONS_ENABLED:-false}
+        NATIVE_TODO_CLI_PATH: ${NATIVE_TODO_CLI_PATH:-/usr/local/bin/wecom-cli}
+        NATIVE_TODO_ALLOWED_WECOM_IDS: ${NATIVE_TODO_ALLOWED_WECOM_IDS:-}
+        BACKUP_DIR: /app/backups
+        MONITOR_STATE_DIR: /app/monitor-state
+        MONITOR_INTERVAL_SECONDS: ${MONITOR_INTERVAL_SECONDS:-60}
+        MONITOR_HEARTBEAT_SECONDS: ${MONITOR_HEARTBEAT_SECONDS:-180}
+        MONITOR_QUEUE_MINUTES: ${MONITOR_QUEUE_MINUTES:-15}
+        MONITOR_FREE_MB: ${MONITOR_FREE_MB:-512}
+        MONITOR_BACKUP_HOURS: ${MONITOR_BACKUP_HOURS:-48}
+        ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
+        ALERT_WEBHOOK_TOKEN: ${ALERT_WEBHOOK_TOKEN:-}
+        ALERT_EMAIL_TO: ${ALERT_EMAIL_TO:-}
+        ALERT_REMINDER_MINUTES: ${ALERT_REMINDER_MINUTES:-60}
+        BACKUP_ALERT_REMINDER_MINUTES: ${BACKUP_ALERT_REMINDER_MINUTES:-1440}
+      WECOM_DIRECTORY_SECRET: ${WECOM_DIRECTORY_SECRET:-}
+    volumes:
+      - ./storage:/app/storage
+      - ./monitor-state:/app/monitor-state:ro
+      - ./native-todo:/home/app/.config/wecom
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_started}
+    command: ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips='*'"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+  worker:
+    image: meeting-actions-app:local
+    pull_policy: never
+    user: "${APP_UID:-10001}:${APP_GID:-10001}"
+    environment: *app-env
+    volumes:
+      - ./storage:/app/storage
+      - ./native-todo:/home/app/.config/wecom
+    depends_on:
+      backend: {condition: service_healthy}
+    command: ["celery", "-A", "app.worker.celery", "worker", "--loglevel=INFO", "--concurrency=2"]
+    restart: unless-stopped
+  beat:
+    image: meeting-actions-app:local
+    pull_policy: never
+    user: "${APP_UID:-10001}:${APP_GID:-10001}"
+    environment: *app-env
+    volumes:
+      - ./storage:/app/storage
+    depends_on:
+      backend: {condition: service_healthy}
+    command: ["celery", "-A", "app.worker.celery", "beat", "--loglevel=INFO", "--schedule=/app/storage/celerybeat-schedule"]
+    restart: unless-stopped
+  frontend:
+    image: meeting-actions-frontend:latest
+    pull_policy: never
+    build: ./frontend
+    ports:
+      - "${FRONTEND_BIND:-127.0.0.1}:${FRONTEND_PORT:-8086}:80"
+    depends_on:
+      backend: {condition: service_healthy}
+    restart: unless-stopped
+  monitor:
+    image: meeting-actions-app:local
+    pull_policy: never
+    user: "${APP_UID:-10001}:${APP_GID:-10001}"
+    environment: *app-env
+    volumes:
+      - ./storage:/app/storage
+      - ./backups:/app/backups:ro
+      - ./monitor-state:/app/monitor-state
+    command: ["python", "-m", "app.monitor"]
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.monitor", "--check"]
+      interval: 60s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+    restart: unless-stopped

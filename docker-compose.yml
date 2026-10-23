@@ -1,0 +1,27 @@
+name: meeting-actions
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: meetings
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-meetings}
+      POSTGRES_DB: meetings
+    ports:
+      - "127.0.0.1:55436:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U meetings -d meetings"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:56386:6379"
+    volumes:
+      - redis_data:/data
+    command: ["redis-server", "--appendonly", "yes"]
+volumes:
+  postgres_data:
+  redis_data:

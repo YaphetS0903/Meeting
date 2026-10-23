@@ -1,0 +1,14 @@
+[Unit]
+Description=Meeting actions database and attachment backup
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/meeting-actions/app
+ExecStart=/bin/bash /home/meeting-actions/app/scripts/scheduled-backup.sh
+TimeoutStartSec=20min
+UMask=0077
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
