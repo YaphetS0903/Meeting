@@ -26,6 +26,6 @@ test("会议列表请求出错时显示错误和重试，不显示空归档", as
     0,
   );
   await expect(
-    page.getByRole("button", { name: "浏览器验收例会" }),
+    page.getByRole("button", { name: "浏览器验收例会", exact: true }),
   ).toBeVisible();
 });

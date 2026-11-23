@@ -40,7 +40,13 @@ from app.services.business import (
     today,
     validate_draft,
 )
-from app.services.exports import export_report, generate_exports, pdf_minutes, xlsx_minutes
+from app.services.exports import (
+    attachment_filename,
+    export_report,
+    generate_exports,
+    pdf_minutes,
+    xlsx_minutes,
+)
 from app.services.integrations import (
     DeliveryUncertain,
     NotConfigured,
@@ -50,15 +56,8 @@ from app.services.integrations import (
     oauth_user,
     sync_directory,
 )
-from app.services.recurrence import (
-    RecurrenceCreate,
-    RecurrenceUpdate,
-    enable_rule,
-    rule_snapshot,
-    update_rule,
-    visible_rule_snapshot,
-)
 from app.services.reporting import report
+from app.services.role_permissions import file_allowed, meeting_require
 
 router = APIRouter(prefix="/api")
 
@@ -93,32 +92,6 @@ def connection_results(db: Session = Depends(get_db), user: User = Depends(admin
     return result
 
 
-@router.post("/tasks/{identifier}/recurrence")
-def create_recurrence(
-    identifier: str, body: RecurrenceCreate, db: Session = Depends(get_db), user: User = Depends(current_user)
-):
-    return rule_snapshot(enable_rule(db, user, identifier, body))
-
-
-@router.get("/tasks/{identifier}/recurrence")
-def read_recurrence(identifier: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
-    from app.models import RecurringRule
-
-    task = db.get(Task, identifier)
-    if not task:
-        raise HTTPException(404, "任务不存在")
-    task_access(db, user, task)
-    rule = db.get(RecurringRule, task.recurrence_key) if task.recurrence_key else None
-    return visible_rule_snapshot(db, user, rule) if rule else None
-
-
-@router.put("/recurrences/{identifier}")
-def change_recurrence(
-    identifier: str, body: RecurrenceUpdate, db: Session = Depends(get_db), user: User = Depends(current_user)
-):
-    return rule_snapshot(update_rule(db, user, identifier, body))
-
-
 @router.get("/admin/operations")
 def operations(user: User = Depends(admin_user)):
     from app.services.monitoring import public_monitor_state
@@ -138,7 +111,9 @@ def preview_minutes(
     meeting = db.get(Meeting, identifier)
     if not meeting:
         raise HTTPException(404, "会议不存在")
-    meeting_access(db, user, meeting, edit=True)
+    meeting_require(db, user, meeting, "preview")
+    if body.format != "pdf" and not file_allowed(db, user, meeting, "download"):
+        raise HTTPException(403, "没有下载会议文件的权限")
     if not meeting.has_draft or meeting.draft_version != body.expected_version:
         raise HTTPException(409, "草稿已变化，请重新保存并预览")
     draft = MeetingDraft.model_validate(meeting.draft)
@@ -157,6 +132,7 @@ def preview_minutes(
         identifier = snapshot.get(role + "_id")
         snapshot[role + "_name"] = db.get(User, identifier).name if identifier else ""
     snapshot["attendee_names"] = [db.get(User, i).name for i in draft.attendee_ids]
+    snapshot["online_attendee_names"] = [db.get(User, i).name for i in draft.online_attendee_ids]
     for item in snapshot["items"]:
         item["owner_names"] = [db.get(User, i).name for i in item["owner_ids"]]
         item["verifier_name"] = db.get(User, item.get("verifier_id") or draft.host_id).name
@@ -299,6 +275,8 @@ def task_suggestions(
 
 class ReminderConfig(BaseModel):
     enabled: bool = True
+    deadline_enabled: bool = True
+    daily_enabled: bool = False
     hour: int = Field(default=9, ge=0, le=23)
     before_days: int = Field(default=1, ge=0, le=30)
     overdue_enabled: bool = True
@@ -328,7 +306,7 @@ def save_reminder_config(
         db.add(SystemSetting(key="reminders", value=value))
     db.flush()
     cancelled = 0
-    if not body.enabled:
+    if not body.enabled or not body.daily_enabled or not body.deadline_enabled:
         for event in db.scalars(
             select(OutboxEvent).where(
                 OutboxEvent.channel.in_(["wecom", "email"]),
@@ -385,6 +363,8 @@ def upload(
         if not meeting:
             raise HTTPException(404, "会议不存在")
         meeting_access(db, user, meeting, edit=True)
+        if not file_allowed(db, user, meeting, "upload"):
+            raise HTTPException(403, "没有上传会议附件的权限")
         if not meeting.has_draft:
             raise HTTPException(409, "已发布会议请先创建修订版本")
     if task_id:
@@ -446,6 +426,8 @@ def export_meeting(
     if not meeting:
         raise HTTPException(404, "会议不存在")
     meeting_access(db, user, meeting)
+    if not file_allowed(db, user, meeting, "download"):
+        raise HTTPException(403, "没有下载会议文件的权限")
     version = version or meeting.published_version
     if not version or not db.scalar(
         select(MeetingVersion.id).where(
@@ -457,7 +439,33 @@ def export_meeting(
     wanted = {"xlsx": "minutes_xlsx", "pdf": "minutes_pdf", "tasks": "tasks_xlsx"}[format]
     file = next(a for a in attachments if a.kind == wanted)
     return FileResponse(
-        get_settings().storage_dir / file.storage_key, filename=file.filename, media_type=file.mime_type
+        get_settings().storage_dir / file.storage_key,
+        filename=attachment_filename(file, db),
+        media_type=file.mime_type,
+    )
+
+
+@router.get("/reports/new-arrangements")
+def report_new_arrangements(
+    start: date,
+    end: date,
+    department_id: str | None = None,
+    person_id: str | None = None,
+    series_key: str | None = None,
+    kind: str | None = None,
+    leader_id: str | None = None,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+):
+    if start > end:
+        raise HTTPException(422, "开始日期不能晚于结束日期")
+    from app.services.senior_arrangements import senior_arrangements
+
+    return senior_arrangements(
+        db, user, start, end, department_id, person_id, series_key, kind, offset=offset, limit=limit,
+        leader_id=leader_id
     )
 
 
@@ -465,21 +473,35 @@ def export_meeting(
 def report_export(
     start: date,
     end: date,
-    group_by: Literal["meeting_department", "person_department", "person", "kind"] = "meeting_department",
+    group_by: Literal[
+        "meeting_department", "person_department", "person", "kind", "department_people"
+    ] = "meeting_department",
     department_id: str | None = None,
     kind: str | None = None,
     person_id: str | None = None,
     status: str | None = None,
+    series_key: str | None = None,
+    senior_only: bool = False,
+    leader_id: str | None = None,
     db: Session = Depends(get_db),
     user: User = Depends(current_user),
 ):
     if start > end:
         raise HTTPException(422, "开始日期不能晚于结束日期")
-    data = report(db, user, start, end, group_by, department_id, kind, person_id, status)
+    from app.services.report_access import report_export_access
+
+    report_export_access(db, user, department_id, person_id, senior_only=senior_only)
+    data = report(
+        db, user, start, end, group_by, department_id, kind, person_id, status, series_key, senior_only,
+        leader_id=leader_id
+    )
     return Response(
         export_report(data),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": "attachment; filename*=UTF-8''" + quote("会议考核报表.xlsx")},
+        headers={
+            "Content-Disposition": "attachment; filename*=UTF-8''"
+            + quote("中高层会议统计报表.xlsx" if senior_only else "会议考核报表.xlsx")
+        },
     )
 
 
@@ -489,6 +511,7 @@ def config(user: User = Depends(admin_user)):
     return {
         "wecom_configured": bool(s.wecom_corp_id and s.wecom_secret and s.wecom_agent_id),
         "smtp_configured": bool(s.smtp_host and s.smtp_from),
+        "directory_sync_interval_minutes": 60,
         "ai_configured": bool(s.ai_base_url and s.ai_api_key and s.ai_model),
         "ai_model": s.ai_model if s.ai_base_url and s.ai_api_key and s.ai_model else "",
         "native_todo_enabled": s.native_todo_enabled,
@@ -535,10 +558,17 @@ def native_todo_status(db: Session = Depends(get_db), user: User = Depends(admin
         "active_links": db.scalar(
             select(func.count()).select_from(NativeTodoLink).where(NativeTodoLink.state == "active")
         ),
-        "legacy_links": db.scalar(select(func.count()).select_from(NativeTodoLink).where(
-            NativeTodoLink.provider == "cli", NativeTodoLink.state != "finished",
-        )),
-        "app_links": db.scalar(select(func.count()).select_from(NativeTodoLink).where(NativeTodoLink.provider == "app")),
+        "legacy_links": db.scalar(
+            select(func.count())
+            .select_from(NativeTodoLink)
+            .where(
+                NativeTodoLink.provider == "cli",
+                NativeTodoLink.state != "finished",
+            )
+        ),
+        "app_links": db.scalar(
+            select(func.count()).select_from(NativeTodoLink).where(NativeTodoLink.provider == "app")
+        ),
     }
 
 
@@ -635,8 +665,8 @@ def sync_native_todo_task(identifier: str, db: Session = Depends(get_db), user: 
     if not get_settings().native_todo_source_enabled(source):
         raise HTTPException(409, "该任务来源的原生待办同步尚未开启")
     link = db.scalar(select(NativeTodoLink).where(NativeTodoLink.task_id == task.id))
-    if get_settings().native_todo_app_enabled and source == "direct" and not link:
-        raise HTTPException(409, "请由派发人在企业微信中打开任务详情，确认创建原生待办")
+    if get_settings().native_todo_app_enabled and not link:
+        raise HTTPException(409, "请由派发人或会议发布者在企业微信中确认创建原生待办")
     action = "finish" if task.closed_at and link else ("update" if link else "create")
     before = db.scalar(
         select(OutboxEvent.id).where(
@@ -675,9 +705,15 @@ def resume_native_todo(db: Session = Depends(get_db), user: User = Depends(admin
         raise HTTPException(409, "企业微信通讯录或待办权限尚未恢复，请完成授权后再刷新")
     settings = get_settings()
     count = 0
-    events = db.scalars(select(OutboxEvent).where(
-        OutboxEvent.channel == "native_todo", OutboxEvent.state == "blocked",
-    ).order_by(OutboxEvent.created_at).with_for_update())
+    events = db.scalars(
+        select(OutboxEvent)
+        .where(
+            OutboxEvent.channel == "native_todo",
+            OutboxEvent.state == "blocked",
+        )
+        .order_by(OutboxEvent.created_at)
+        .with_for_update()
+    )
     for item in events:
         task = db.get(Task, item.payload.get("task_id"))
         source = "meeting" if task and task.source_meeting_id else "direct"
@@ -692,18 +728,15 @@ def resume_native_todo(db: Session = Depends(get_db), user: User = Depends(admin
 
 @router.post("/admin/wecom/sync")
 def sync(db: Session = Depends(get_db), user: User = Depends(admin_user)):
-    try:
-        # Roll back partial directory changes while keeping a durable failure record.
-        with db.begin_nested():
-            result = sync_directory(db)
-    except Exception as exc:
-        known = isinstance(exc, (NotConfigured, ProviderRejected))
-        error = str(exc) if known else type(exc).__name__ + "：通讯录同步失败，请检查企业权限与网络连接"
-        audit(db, user, "directory.sync.failed", user, after={"error": error}, reason="通讯录同步失败")
-        db.commit()  # get_db rolls back raised HTTP errors; the failure log must survive that rollback.
-        raise HTTPException(422 if known else 503, error) from None
-    audit(db, user, "directory.sync", user, after=result)
-    return result
+    from app.services.directory_sync import synchronize_directory
+
+    result = synchronize_directory(db, user, synchronizer=sync_directory)
+    if result["state"] == "busy":
+        raise HTTPException(409, result["error"])
+    if result["state"] == "failed":
+        db.commit()  # Preserve the diagnostic when get_db rolls back the HTTP error.
+        raise HTTPException(result["status_code"], result["error"])
+    return result["result"]
 
 
 @router.get("/admin/directory-sync-history")
@@ -713,7 +746,9 @@ def sync_history(db: Session = Depends(get_db), user: User = Depends(admin_user)
             "id": entry.id,
             "created_at": entry.created_at,
             "state": "failed" if entry.action.endswith("failed") else "succeeded",
-            "actor_name": db.get(User, entry.actor_id).name,
+            "actor_name": "系统自动同步"
+            if (entry.after or {}).get("mode") == "automatic"
+            else db.get(User, entry.actor_id).name,
             "result": entry.after,
         }
         for entry in db.scalars(
@@ -727,6 +762,37 @@ def sync_history(db: Session = Depends(get_db), user: User = Depends(admin_user)
 
 class Retry(BaseModel):
     reason: str = Field(min_length=1)
+
+
+@router.post("/admin/notifications/{identifier}/cancel")
+def cancel_notification(
+    identifier: str, body: Retry, db: Session = Depends(get_db), user: User = Depends(admin_user)
+):
+    event = locked_get(db, OutboxEvent, identifier)
+    if not event:
+        raise HTTPException(404, "通知不存在")
+    if event.state not in {"pending", "blocked", "failed"}:
+        raise HTTPException(409, "仅可取消待发送、配置阻塞或明确失败的通知；发送中或结果不明须先核实")
+    before = {"state": event.state, "last_error": event.last_error, "attempts": event.attempts}
+    event.state, event.claimed_at = "skipped", None
+    event.last_error = "管理员取消：" + body.reason
+    from app.models import NotificationLog
+
+    db.add(
+        NotificationLog(
+            event_id=event.id, result="skipped", detail={"reason": body.reason, "actor_id": user.id}
+        )
+    )
+    audit(
+        db,
+        user,
+        "notification.cancel",
+        event,
+        before=before,
+        after={"state": event.state, "last_error": event.last_error},
+        reason=body.reason,
+    )
+    return {"state": event.state}
 
 
 @router.post("/admin/notifications/{identifier}/retry")
@@ -755,7 +821,9 @@ def login_options():
 
 
 @router.get("/auth/wecom/url")
-def wecom_url(request: Request, response: Response, return_to: str = "/tasks", mode: Literal["oauth", "qr"] = "oauth"):
+def wecom_url(
+    request: Request, response: Response, return_to: str = "/tasks", mode: Literal["oauth", "qr"] = "oauth"
+):
     try:
         url, state = oauth_url(return_to, mode)
     except (NotConfigured, ProviderRejected) as exc:
@@ -802,6 +870,7 @@ def wecom_exchange(
     if cookie_name not in request.cookies:
         response.delete_cookie("wecom_oauth", path="/api/auth/wecom")
     response.headers["Cache-Control"] = "no-store"
+    audit(db, user, "auth.login", user, after={"method": "企业微信"})
     return {"access_token": issue_token(user), "token_type": "bearer", "return_to": return_to}
 
 
@@ -837,6 +906,8 @@ def activate(
     item = next((i for i in snapshot["items"] if i["id"] == body.item_id), None)
     if not item:
         raise HTTPException(422, "事项不存在")
+    if item.get("backfill_reference"):
+        raise HTTPException(422, "该历史事项已关联后续任务，请在后续会议中继续跟进，无需重复激活")
     from app.services.historical_links import work_identity
     from app.services.importing import dedup_lock
 

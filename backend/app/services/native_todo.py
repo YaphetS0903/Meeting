@@ -282,7 +282,7 @@ def send_native_todo(db, event) -> dict:
         from app.services.app_native_todo import send_app_native_todo
 
         return send_app_native_todo(db, task, link, action)
-    if settings.native_todo_app_enabled and source == "direct" and not link:
+    if settings.native_todo_app_enabled and not link:
         return {"skipped": "请由派发人在企业微信中确认创建应用待办"}
     if action == "finish":
         if not task.closed_at:

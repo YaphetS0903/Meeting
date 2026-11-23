@@ -9,8 +9,15 @@ from sqlalchemy import select
 
 from app.core.config import get_settings
 from app.core.db import SessionLocal, locked_get
-from app.models import CompletionRequest, Meeting, NotificationLog, OutboxEvent, Task, now
-from app.services.business import enqueue, notification_enabled, owner_ids, task_wecom_enabled
+from app.models import CompletionRequest, Meeting, NotificationLog, OutboxEvent, Task, User, now
+from app.services.business import (
+    daily_reminders_enabled,
+    effective_terminal_review_task_ids,
+    enqueue,
+    notification_enabled,
+    owner_ids,
+    task_wecom_enabled,
+)
 from app.services.exports import generate_exports
 from app.services.integrations import DeliveryUncertain, NotConfigured, send_mail, send_wecom
 from app.services.monitoring import heartbeat
@@ -22,18 +29,33 @@ celery.conf.update(
     enable_utc=True,
     beat_schedule={
         "outbox": {"task": "app.worker.dispatch", "schedule": 15.0},
-        "recurrence": {"task": "app.worker.recurrence", "schedule": crontab(minute=0)},
         "reminders": {"task": "app.worker.reminders", "schedule": crontab(minute=0)},
+        "deadline-reminders": {"task": "app.worker.deadline_reminders", "schedule": crontab(hour=9, minute=0),
+                               "options": {"expires": 3300}},
+        "directory-sync": {"task": "app.worker.directory_sync", "schedule": crontab(minute=0),
+                           "options": {"expires": 3300}},
     },
 )
 
 
+@celery.task(name="app.worker.directory_sync", soft_time_limit=600, time_limit=660)
+def directory_sync():
+    from app.services.directory_sync import synchronize_directory
+
+    config = get_settings()
+    if not (config.wecom_corp_id and config.wecom_secret and config.wecom_agent_id):
+        return {"state": "skipped", "reason": "企业微信应用尚未配置"}
+    with SessionLocal.begin() as db:
+        actor = db.scalar(select(User).where(User.active.is_(True), User.is_admin.is_(True)).order_by(User.id))
+        if not actor:
+            return {"state": "skipped", "reason": "没有可用的管理员账号"}
+        return synchronize_directory(db, actor, automatic=True)
+
+
 @celery.task(name="app.worker.recurrence")
 def recurrence():
-    from app.services.recurrence import generate_instances
-
-    with SessionLocal.begin() as db:
-        return generate_instances(db)
+    # Drain jobs queued by the retired scheduler without creating tasks or notifications.
+    return 0
 
 
 @celery.task(name="app.worker.dispatch")
@@ -87,16 +109,20 @@ def dispatch(limit=50):
                     from app.models import Attachment, ImportBatch, ImportSource, User
                     from app.services.importing import parse_source
 
-                    source = locked_get(db, ImportSource, event.payload["source_id"])
-                    attachment = db.get(Attachment, source.attachment_id)
-                    parse_source(
-                        db,
-                        db.get(User, event.payload["actor_id"]),
-                        db.get(ImportBatch, source.batch_id),
-                        source,
-                        get_settings().storage_dir / attachment.storage_key,
-                    )
-                    result = {}
+                    if event.payload.get('kind') == 'meeting_sheet':
+                        from app.services.sheet_import_jobs import run_job
+                        result = run_job(db, event)
+                    else:
+                        source = locked_get(db, ImportSource, event.payload["source_id"])
+                        attachment = db.get(Attachment, source.attachment_id)
+                        parse_source(
+                            db,
+                            db.get(User, event.payload["actor_id"]),
+                            db.get(ImportBatch, source.batch_id),
+                            source,
+                            get_settings().storage_dir / attachment.storage_key,
+                        )
+                        result = {}
                 elif event.channel == "wecom":
                     result = send_wecom(db, event)
                 elif event.channel == "email":
@@ -106,9 +132,9 @@ def dispatch(limit=50):
                     result = send_native_todo(db, event)
                 else:
                     raise ValueError("未知发送渠道")
-                event.state = "skipped" if result.get("skipped") else "sent"
+                event.state = "failed" if result.get('failed') else ("skipped" if result.get("skipped") else "sent")
                 event.sent_at = now()
-                event.last_error = None
+                event.last_error = result.get('error')
             except NotConfigured as exc:
                 event.state = "blocked"
                 event.last_error = str(exc)
@@ -127,6 +153,9 @@ def dispatch(limit=50):
                     event.state = "pending"
                     event.available_at = now() + timedelta(seconds=min(3600, 30 * 2**event.attempts))
             db.add(NotificationLog(event_id=event.id, result=event.state, detail=result))
+            from app.services.operation_logs import log_delivery
+            if event.payload.get('kind') != 'meeting_sheet':
+                log_delivery(db, event, result)
             db.commit()
             processed += 1
     return processed
@@ -137,6 +166,8 @@ def reminders():
     current = now()
     day = current.astimezone(ZoneInfo("Asia/Shanghai")).date()
     with SessionLocal() as db:
+        if not daily_reminders_enabled(db):
+            return 0
         from collections import defaultdict
 
         from app.models import SystemSetting
@@ -159,14 +190,16 @@ def reminders():
             return 0
 
         groups = defaultdict(list)
-        for task in db.scalars(
+        tasks = list(db.scalars(
             select(Task).where(
                 Task.closed_at.is_(None),
                 Task.due_date.is_not(None),
                 Task.status.notin_(["关闭", "不统计", "已完成"]),
             )
-        ):
-            if not task_wecom_enabled(db, task):
+        ))
+        terminal_reviews = effective_terminal_review_task_ids(db, [task.id for task in tasks])
+        for task in tasks:
+            if task.id in terminal_reviews or not task_wecom_enabled(db, task):
                 continue
             delta = (task.due_date - day).days
             if delta == config["before_days"] or (delta < 0 and config["overdue_enabled"]):
@@ -205,3 +238,11 @@ def reminders():
                 },
             )
         db.commit()
+
+
+@celery.task(name="app.worker.deadline_reminders")
+def deadline_reminders():
+    from app.services.deadline_reminders import enqueue_due_reminders
+
+    with SessionLocal.begin() as db:
+        return enqueue_due_reminders(db, now())

@@ -14,7 +14,7 @@ from app.services.importing import confirm_candidate, correct_candidate
 from tests.test_import_correction import candidate
 
 
-def confirmed(db, team, when="2026-08-18", reference=None, status="未完成"):
+def confirmed(db, team, when="2026-08-18", reference=None, status="未完成", *, due_date=None):
     c, issue = candidate(db, team)
     p = deepcopy(c.corrected)
     p.update(
@@ -24,6 +24,8 @@ def confirmed(db, team, when="2026-08-18", reference=None, status="未完成"):
         series_id=team["series"].id,
     )
     p["items"][0].update(historical_reference=reference, status=status)
+    if due_date:
+        p["items"][0]["due_date"] = due_date
     correct_candidate(db, team["host"], c.id, p, 1, "核对原文并关联")
     return c, confirm_candidate(db, team["host"], c.id, 2, "核对通过")
 

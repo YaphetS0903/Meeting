@@ -1,0 +1,786 @@
+/* user-pinned-shadcn-20261106: neutral operating surfaces, blue primary actions.
+   This layer owns the visual system; page CSS retains workflow-specific layout. */
+:root {
+  color-scheme: light;
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Microsoft YaHei", sans-serif;
+  color: #18181b;
+  background: #fafafa;
+  --ink: #18181b;
+  --muted: #71717a;
+  --line: #e4e4e7;
+  --canvas: #fafafa;
+  --surface: #ffffff;
+  --surface-muted: #f4f4f5;
+  --nav: #fafafa;
+  --brand: #2563eb;
+  --brand-deep: #1d4ed8;
+  --soft-blue: #eff6ff;
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 4%);
+  --shadow-md: 0 8px 24px rgb(0 0 0 / 8%);
+  --el-color-primary: #2563eb;
+  --el-color-primary-dark-2: #1d4ed8;
+  --el-color-primary-light-3: #4f7cf0;
+  --el-color-primary-light-5: #93b4fa;
+  --el-color-primary-light-7: #bfdbfe;
+  --el-color-primary-light-8: #dbeafe;
+  --el-color-primary-light-9: #eff6ff;
+  --el-color-success: #15803d;
+  --el-color-success-light-9: #f0fdf4;
+  --el-color-danger: #b91c1c;
+  --el-color-danger-light-9: #fef2f2;
+  --el-color-warning: #a16207;
+  --el-color-warning-light-9: #fffbeb;
+  --el-color-info: #71717a;
+  --el-color-info-light-9: #f4f4f5;
+  --el-text-color-primary: #18181b;
+  --el-text-color-regular: #3f3f46;
+  --el-text-color-secondary: #71717a;
+  --el-text-color-placeholder: #71717a;
+  --el-border-color: #d4d4d8;
+  --el-border-color-light: #e4e4e7;
+  --el-border-color-lighter: #ededf0;
+  --el-fill-color: #f4f4f5;
+  --el-fill-color-light: #fafafa;
+  --el-fill-color-lighter: #fafafa;
+  --el-fill-color-blank: #fff;
+  --el-bg-color: #fff;
+  --el-bg-color-page: #fafafa;
+  --el-border-radius-base: 6px;
+  --el-component-size: 34px;
+  --el-box-shadow-light: 0 4px 16px rgb(0 0 0 / 8%);
+}
+html,
+body,
+.app-shell .workspace {
+  background: var(--canvas);
+}
+::selection {
+  color: #172554;
+  background: #dbeafe;
+}
+input,
+textarea {
+  caret-color: var(--brand);
+}
+* {
+  scrollbar-color: #c4c4cc transparent;
+  scrollbar-width: thin;
+}
+:where(button, a, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 3px;
+}
+a {
+  text-underline-offset: 3px;
+}
+.eyebrow {
+  display: none;
+}
+
+/* Desktop edge tab follows the rail; phones retain the drawer trigger. */
+.app-shell {
+  --navigation-width: 224px;
+}
+.app-shell.navigation-compact {
+  --navigation-width: 64px;
+}
+.app-shell .sidebar {
+  position: fixed;
+  inset: 0 auto 0 0;
+  width: var(--navigation-width);
+  height: 100dvh;
+  padding: 18px 12px 14px;
+  background: #fafafa;
+  color: #52525b;
+  border-right: 1px solid var(--line);
+  box-shadow: none;
+  backdrop-filter: none;
+}
+.app-shell .workspace {
+  margin-left: var(--navigation-width);
+}
+.navigation-edge-trigger {
+  position: fixed;
+  top: 144px;
+  left: calc(var(--navigation-width) - 1px);
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 72px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #71717a;
+  cursor: pointer;
+}
+.navigation-edge-shape {
+  position: absolute;
+  inset: 0;
+  width: 24px;
+  height: 72px;
+  fill: #e4e4e7;
+  transition: fill 120ms ease-out;
+}
+.navigation-edge-arrow {
+  position: relative;
+  width: 16px;
+  height: 16px;
+  fill: currentColor;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+}
+.navigation-edge-trigger[aria-expanded="false"] .navigation-edge-arrow {
+  transform: rotate(180deg);
+}
+.navigation-edge-trigger:hover {
+  color: #3f3f46;
+}
+.navigation-edge-trigger:hover .navigation-edge-shape {
+  fill: #d4d4d8;
+}
+.app-shell .brand,
+.navigation-drawer .brand {
+  display: flex;
+  justify-content: flex-start;
+  gap: 10px;
+  margin: 0 6px 28px;
+  font-size: 17px;
+  line-height: 1.3;
+  font-weight: 650;
+  white-space: nowrap;
+}
+.app-shell .brand-mark,
+.navigation-drawer .brand-mark {
+  flex: 0 0 32px;
+  width: 32px;
+  height: 32px;
+  font-size: 19px;
+  font-weight: 650;
+  border-radius: 7px;
+  color: #fff;
+  background: var(--brand);
+  box-shadow: none;
+}
+.app-shell .brand-title,
+.navigation-drawer .brand-title {
+  display: block;
+}
+.app-shell .brand small,
+.navigation-drawer .brand small {
+  display: block;
+  margin-top: 4px;
+  font-size: 11px;
+  letter-spacing: 0.3px;
+  color: #71717a;
+}
+.app-shell .sidebar .nav-label {
+  display: block;
+  margin: 0 10px 8px;
+  font-size: 12px;
+  letter-spacing: 0;
+  color: #71717a;
+}
+.workspace-navigation {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 4px;
+  align-content: start;
+  min-height: 0;
+}
+.workspace-navigation a {
+  min-height: 40px;
+  justify-content: flex-start;
+  padding: 9px 10px;
+  gap: 10px;
+  border: 0;
+  border-radius: 6px;
+  color: #52525b;
+  font-size: 14px;
+  font-weight: 450;
+  background: transparent;
+  box-shadow: none;
+  transition:
+    background-color 120ms ease-out,
+    color 120ms ease-out;
+}
+.app-shell .sidebar .workspace-navigation a {
+  justify-content: flex-start;
+}
+.app-shell .sidebar .workspace-navigation a > span {
+  display: block;
+}
+.workspace-navigation a:hover {
+  color: #18181b;
+  background: #f0f0f2;
+  border: 0;
+}
+.workspace-navigation a.router-link-active {
+  color: #18181b;
+  background: #eaeaec;
+  font-weight: 600;
+  box-shadow: none;
+}
+.workspace-navigation .el-icon {
+  display: inline-flex;
+  font-size: 18px;
+  flex: 0 0 18px;
+}
+.app-shell .sidebar-note {
+  display: block;
+  padding: 16px 8px 0;
+  margin-top: 16px;
+  border-color: var(--line);
+  color: #71717a;
+}
+.app-shell .sidebar-note p {
+  margin: 4px 0 0;
+}
+.app-shell .live-dot {
+  background: #71717a;
+  box-shadow: none;
+}
+.app-shell.navigation-compact .sidebar {
+  padding-inline: 10px;
+}
+.app-shell.navigation-compact .sidebar .brand {
+  margin: 0 auto 28px;
+  justify-content: center;
+}
+.app-shell.navigation-compact
+  .sidebar
+  :is(.brand-title, .nav-label, .sidebar-note),
+.app-shell.navigation-compact .sidebar .workspace-navigation a > span {
+  display: none;
+}
+.app-shell.navigation-compact .sidebar .workspace-navigation a {
+  justify-content: center;
+  padding: 10px;
+}
+.app-shell .topbar {
+  height: 56px;
+  padding: 0 20px;
+  border-color: var(--line);
+  background: #fff;
+  color: #71717a;
+  box-shadow: none;
+  backdrop-filter: none;
+}
+.topbar .navigation-trigger {
+  width: 36px;
+  height: 36px;
+  padding: 8px;
+  flex: 0 0 36px;
+  display: inline-grid;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #3f3f46;
+}
+.topbar .navigation-trigger:hover {
+  background: #f4f4f5;
+  color: #18181b;
+}
+.app-shell .workspace-back {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  padding: 8px;
+}
+.app-shell .workspace-back:hover:not(.is-disabled) {
+  background: #f4f4f5;
+}
+.app-shell .topbar-leading {
+  gap: 10px;
+}
+.app-shell .topbar-account {
+  gap: 10px;
+}
+.app-shell .avatar {
+  background: #f4f4f5;
+  color: #52525b;
+  box-shadow: none;
+  border: 1px solid #e4e4e7;
+}
+.app-shell .workspace-user-name {
+  color: #3f3f46;
+}
+.app-shell main#main {
+  padding: 24px 24px 20px;
+}
+.app-shell .workspace > footer {
+  color: #71717a;
+  font-size: 12px;
+}
+
+/* Shared content hierarchy, tables and forms. */
+.app-shell .page-heading {
+  gap: 16px;
+  margin-bottom: 20px;
+}
+.app-shell .page-heading h1,
+.app-shell .dispatch-heading h1 {
+  font-size: 24px;
+  line-height: 1.4;
+  font-weight: 650;
+  letter-spacing: -0.3px;
+}
+.app-shell .page-heading p {
+  color: #71717a;
+  font-size: 13px;
+}
+.app-shell .panel,
+.app-shell .task-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: none;
+}
+.app-shell .task-card:hover {
+  transform: none;
+  box-shadow: var(--shadow-sm);
+  border-color: #a1a1aa;
+}
+.app-shell .panel-heading,
+.app-shell .section-card-heading {
+  min-height: 50px;
+  padding: 12px 18px;
+  border-color: var(--line);
+}
+.app-shell .panel-heading h2,
+.app-shell .section-title h2 {
+  font-size: 16px;
+  font-weight: 600;
+}
+.panel-heading > h2::before,
+.panel.section-body > h2::before {
+  display: none;
+}
+.app-shell .section-body {
+  padding: 18px;
+}
+.app-shell .filters {
+  padding: 16px 18px;
+}
+.app-shell .filter-row,
+.app-shell .toolbar {
+  gap: 8px;
+}
+.app-shell .count {
+  color: #52525b;
+  background: #f4f4f5;
+  border: 1px solid #e4e4e7;
+}
+.app-shell .section-icon {
+  color: #52525b;
+  background: #f4f4f5;
+  box-shadow: none;
+  border-radius: 6px;
+}
+.app-shell .section-note {
+  background: #fafafa;
+  color: #71717a;
+  border-color: var(--line);
+}
+.app-shell .section-title {
+  gap: 8px;
+}
+.el-button {
+  font-weight: 500;
+  border-radius: 6px;
+  box-shadow: none;
+  transition:
+    color 120ms ease-out,
+    background-color 120ms ease-out,
+    border-color 120ms ease-out;
+}
+.el-button--primary:not(.is-link):not(.is-text):not(.is-plain) {
+  background: var(--el-button-bg-color);
+  border-color: var(--el-button-border-color);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 5%);
+}
+.el-button--primary:not(.is-link):not(.is-text):not(.is-plain):hover {
+  background: var(--el-button-hover-bg-color);
+  border-color: var(--el-button-hover-border-color);
+  box-shadow: none;
+  transform: none;
+}
+.el-button--primary:not(.is-link):not(.is-text):not(.is-plain).is-disabled {
+  background: var(--el-button-disabled-bg-color);
+  border-color: var(--el-button-disabled-border-color);
+  box-shadow: none;
+}
+.el-input__wrapper,
+.el-select__wrapper,
+.el-textarea__inner {
+  border-radius: 6px;
+  background: #fff;
+  box-shadow: 0 0 0 1px #d4d4d8 inset;
+}
+.el-input__wrapper:hover,
+.el-select__wrapper:hover,
+.el-textarea__inner:hover {
+  box-shadow: 0 0 0 1px #a1a1aa inset;
+}
+.el-input__wrapper.is-focus,
+.el-select__wrapper.is-focused,
+.el-textarea__inner:focus {
+  box-shadow: 0 0 0 1px #2563eb inset;
+  outline: 2px solid #bfdbfe;
+  outline-offset: 1px;
+}
+.el-input.is-disabled .el-input__wrapper,
+.el-select__wrapper.is-disabled {
+  background: #f4f4f5;
+}
+.el-form-item__label {
+  color: #3f3f46;
+  font-size: 13px;
+  font-weight: 500;
+}
+.el-input__inner,
+.el-select__placeholder,
+.el-textarea__inner {
+  color: #27272a;
+}
+.el-select__placeholder.is-transparent {
+  color: #71717a;
+}
+.el-select-dropdown__item.is-hovering {
+  background: #f4f4f5;
+}
+.el-table {
+  --el-table-header-bg-color: #fafafa;
+  --el-table-header-text-color: #52525b;
+  --el-table-row-hover-bg-color: #fafafa;
+  --el-table-border-color: #e4e4e7;
+  color: #27272a;
+}
+.el-table th.el-table__cell {
+  height: 40px;
+  background: #fafafa;
+  font-weight: 500;
+  font-size: 13px;
+}
+.el-table td.el-table__cell {
+  padding: 12px 0;
+}
+.el-table .cell {
+  padding-inline: 16px;
+  line-height: 1.6;
+}
+.el-table th:first-child .cell,
+.el-table td:first-child .cell {
+  padding-left: 18px;
+}
+.el-table,
+.minutes-table,
+.stat strong {
+  font-variant-numeric: tabular-nums;
+}
+.app-shell .table-link {
+  color: #1d4ed8;
+  font-weight: 500;
+}
+.el-pagination {
+  padding: 16px 18px;
+}
+.el-tabs__item {
+  color: #71717a;
+  font-weight: 500;
+}
+.el-tabs__item.is-active {
+  color: #1d4ed8;
+}
+.el-tabs__nav-wrap::after {
+  background: #e4e4e7;
+}
+.app-shell .stat-grid {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  gap: 0;
+}
+.app-shell .stat-grid .stat {
+  padding: 14px 18px;
+  border: 0;
+  border-right: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.app-shell .stat-grid .stat:last-child {
+  border-right: 0;
+}
+.app-shell .stat::before,
+.app-shell .stat::after {
+  display: none;
+}
+.app-shell .stat strong {
+  color: #18181b;
+  font-size: 28px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+.app-shell .stat span,
+.app-shell .stat small {
+  color: #71717a;
+}
+.status-tag {
+  color: #1d4ed8;
+  background: #eff6ff;
+  border-color: #dbeafe;
+  font-weight: 500;
+}
+.status-tag.is-success {
+  color: #166534;
+  background: #f0fdf4;
+  border-color: #bbf7d0;
+}
+.status-tag.is-danger {
+  color: #991b1b;
+  background: #fef2f2;
+  border-color: #fecaca;
+}
+.status-tag.is-muted {
+  color: #52525b;
+  background: #f4f4f5;
+  border-color: #e4e4e7;
+}
+
+/* Meeting sheets retain every field and their sticky task actions. */
+.app-shell .workspace .meeting-save-actions {
+  background: #fafafa;
+}
+.app-shell .meeting-plan-table thead {
+  background: #fafafa;
+}
+.app-shell .minutes-table {
+  color: #27272a;
+}
+.app-shell .minutes-table th {
+  background: #fafafa;
+  color: #52525b;
+  font-weight: 500;
+  border-color: var(--line);
+}
+.app-shell .minutes-table td {
+  border-color: var(--line);
+}
+.app-shell .minutes-table tbody tr:hover {
+  background: #fafafa;
+}
+.app-shell .person-avatar,
+.app-shell .attendee-person:nth-child(n) .person-avatar {
+  background: #f4f4f5;
+  color: #52525b;
+  box-shadow: none;
+  border-color: #e4e4e7;
+}
+.app-shell .attendee-person strong {
+  color: #3f3f46;
+}
+.app-shell .attendee-person small {
+  color: #71717a;
+}
+.app-shell .verification-card blockquote,
+.app-shell .source-banner,
+.app-shell .original-values {
+  background: #fafafa;
+  border-color: #e4e4e7;
+}
+.app-shell .dispatch-page {
+  --dispatch-text: #27272a;
+  --dispatch-muted: #71717a;
+  --dispatch-line: #e4e4e7;
+  --dispatch-tint: #fafafa;
+  --dispatch-blue: #2563eb;
+}
+
+/* Overlays share the same surface and keep actions reachable on short screens. */
+.el-drawer,
+.el-dialog,
+.el-message-box {
+  --el-dialog-border-radius: 10px;
+  background: #fff;
+  border-radius: 10px;
+}
+.el-drawer {
+  border-radius: 0;
+}
+.el-dialog {
+  padding: 0;
+  box-shadow: 0 16px 48px rgb(0 0 0 / 16%);
+}
+.el-dialog__header {
+  padding: 18px 48px 16px 20px;
+  margin: 0;
+  border-bottom: 1px solid var(--line);
+}
+.el-dialog__headerbtn {
+  top: 10px;
+  right: 10px;
+}
+.el-dialog__title {
+  font-size: 17px;
+  font-weight: 600;
+  color: #18181b;
+}
+.el-dialog__body {
+  padding: 20px;
+  color: #3f3f46;
+}
+.el-dialog__footer {
+  padding: 14px 20px;
+  border-top: 1px solid var(--line);
+}
+.el-dialog__footer .el-button {
+  min-height: 34px;
+}
+.el-overlay {
+  background-color: rgb(9 9 11 / 40%);
+}
+.navigation-drawer .el-drawer__header {
+  padding: 16px;
+  margin: 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 14px;
+}
+.navigation-drawer .el-drawer__body {
+  padding: 20px 12px;
+}
+.navigation-drawer .brand {
+  margin: 0 10px 24px;
+}
+.navigation-drawer .workspace-navigation a {
+  min-height: 44px;
+}
+.login-page {
+  background: #fafafa;
+}
+.login-card {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: var(--shadow-md);
+}
+
+@media (min-width: 768px) and (max-width: 1440px) {
+  .app-shell main#main {
+    padding: 20px 20px 16px;
+  }
+  .app-shell .page-heading {
+    margin-bottom: 16px;
+  }
+  .app-shell .page-heading h1,
+  .app-shell .dispatch-heading h1 {
+    font-size: 22px;
+  }
+  .app-shell .stat-grid .stat {
+    min-height: 72px;
+    padding: 10px 16px;
+  }
+  .app-shell .stat strong {
+    font-size: 26px;
+  }
+}
+@media (max-height: 700px) {
+  .app-shell .sidebar .sidebar-note {
+    display: none;
+  }
+}
+@media (max-width: 767px) {
+  .app-shell {
+    display: block;
+  }
+  .app-shell .workspace {
+    margin-left: 0;
+  }
+  .app-shell .topbar {
+    height: 56px;
+    padding: 0 12px;
+    flex-wrap: nowrap;
+  }
+  .app-shell .topbar-leading {
+    gap: 6px;
+  }
+  .app-shell .workspace-label {
+    display: none;
+  }
+  .app-shell .topbar-account {
+    gap: 6px;
+  }
+  .app-shell .workspace-user-name {
+    max-width: 5em;
+  }
+  .app-shell .topbar-account .el-button {
+    padding-inline: 5px;
+    min-height: 36px;
+  }
+  .app-shell main#main {
+    padding: 18px 14px;
+  }
+  .app-shell .page-heading {
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+  .app-shell .page-heading h1,
+  .app-shell .dispatch-heading h1 {
+    font-size: 21px;
+  }
+  .app-shell .panel-heading,
+  .app-shell .section-card-heading {
+    padding: 12px 14px;
+  }
+  .app-shell .section-body,
+  .app-shell .filters {
+    padding: 14px;
+  }
+  .app-shell .stat-grid .stat {
+    min-height: 72px;
+    padding: 12px;
+    border-bottom: 1px solid var(--line);
+  }
+  .app-shell .stat strong {
+    font-size: 24px;
+  }
+  .app-shell .stat small {
+    display: block;
+  }
+  .el-dialog__header {
+    padding: 16px 44px 14px 16px;
+  }
+  .el-dialog__body {
+    padding: 16px;
+  }
+  .el-dialog__footer {
+    padding: 12px 16px;
+  }
+  .el-dialog__footer .el-button {
+    min-height: 40px;
+  }
+}
+@media (max-width: 380px) {
+  .app-shell .topbar-account .avatar {
+    display: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .workspace-navigation a,
+  .navigation-edge-shape,
+  .el-button {
+    transition: none;
+  }
+}
+
+@media (min-width: 768px) {
+  @container (max-width: 1040px) {
+    .app-shell .workspace .meeting-plan-table thead {
+      position: static;
+    }
+  }
+}

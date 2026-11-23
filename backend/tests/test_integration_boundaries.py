@@ -37,15 +37,25 @@ def test_oauth_state_short_cookie_bound_and_one_use(db, team, monkeypatch):
         integrations.oauth_user(db, "code", state, state)
 
 
-def test_smtp_attaches_published_pdf_and_task_sheet(db, team, draft_factory, tmp_path, monkeypatch):
+@pytest.mark.parametrize("sender", ["meetings@example.com", "Old Sender <meetings@example.com>"])
+def test_smtp_attaches_one_minutes_image_and_task_sheet(db, team, draft_factory, tmp_path, monkeypatch, sender):
     settings = get_settings()
     monkeypatch.setattr(settings, "storage_dir", tmp_path)
     monkeypatch.setattr(settings, "smtp_host", "smtp.invalid")
-    monkeypatch.setattr(settings, "smtp_from", "meetings@example.com")
+    monkeypatch.setattr(settings, "smtp_from", sender)
     team["a"].email = "owner@example.com"
     draft = draft_factory()
     draft.recipient_ids = [team["a"].id]
-    published(db, team, draft)
+    meeting = published(db, team, draft)
+    # Cached files created before the naming change must also send clean names.
+    from app.services.exports import generate_mail_exports
+
+    cached = generate_mail_exports(db, meeting.id, 1)
+    for attachment in cached:
+        label = "任务单.xlsx" if attachment.kind == "tasks_xlsx" else "纪要.png"
+        attachment.filename = f"{draft.title}-V1-{label}"
+    original_names = [a.filename for a in cached]
+    db.flush()
     event = db.scalar(select(OutboxEvent).where(OutboxEvent.channel == "email"))
     sent = []
     smtp = Mock()
@@ -53,10 +63,31 @@ def test_smtp_attaches_published_pdf_and_task_sheet(db, team, draft_factory, tmp
     monkeypatch.setattr(integrations.smtplib, "SMTP", lambda *args, **kwargs: smtp)
     result = integrations.send_mail(db, event)
     assert result["message_id"] and sent[0]["To"] == "owner@example.com"
+    from email import policy
+    from email.parser import BytesParser
+
+    decoded = BytesParser(policy=policy.default).parsebytes(sent[0].as_bytes())
+    assert decoded["From"].addresses[0].display_name == "会议纪要派送员"
+    assert decoded["From"].addresses[0].addr_spec == "meetings@example.com"
+    assert str(decoded["Subject"]) == draft.title
     assert {a.get_content_type() for a in sent[0].iter_attachments()} == {
-        "application/pdf",
+        "image/png",
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     }
+    attachments = list(sent[0].iter_attachments())
+    assert len(attachments) == 2
+    assert all("-V1-" not in a.get_filename() for a in attachments)
+    assert [a.filename for a in cached] == original_names
+    image = next(a for a in attachments if a.get_content_type() == "image/png")
+    from io import BytesIO
+
+    from PIL import Image
+
+    with Image.open(BytesIO(image.get_payload(decode=True))) as preview:
+        assert preview.width >= 1000
+    html = sent[0].get_body(preferencelist=("html",)).get_content()
+    assert image["Content-ID"].strip("<>") in html
+    assert image.get_filename().endswith(".png")
     smtp.starttls.assert_called_once()
 
 

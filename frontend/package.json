@@ -8,18 +8,23 @@
     "build": "vue-tsc --noEmit && vite build",
     "test:e2e": "playwright test",
     "format": "prettier --write src tests *.ts *.json",
-    "format:check": "prettier --check src tests *.ts *.json"
+    "format:check": "prettier --check src tests *.ts *.json",
+    "test:e2e:mock": "playwright test --config playwright.mock.config.ts",
+    "test:e2e:real": "playwright test --config playwright.real.config.ts"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",
     "@wecom/jssdk": "2.4.4",
     "element-plus": "^2.11.3",
+    "pdfjs-dist": "6.4.299",
+    "sortablejs": "1.15.6",
     "vue": "^3.5.22",
     "vue-router": "^4.5.1"
   },
   "devDependencies": {
     "@playwright/test": "^1.55.1",
     "@types/node": "^24.13.6",
+    "@types/sortablejs": "1.15.8",
     "@vitejs/plugin-vue": "^6.0.1",
     "prettier": "^3.9.8",
     "typescript": "^5.9.2",

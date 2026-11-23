@@ -11,7 +11,7 @@ test("企业登录回调保留申请目标并清除授权参数（模拟提供�
   const token = (await login.json()).access_token;
   let destination = "";
   await page.route("**/api/auth/options", (route) =>
-    route.fulfill({ json: { wecom: true } }),
+    route.fulfill({ json: { wecom: true, wecom_qr: true } }),
   );
   await page.route("**/api/auth/wecom/url?*", (route) => {
     destination =
@@ -32,7 +32,9 @@ test("企业登录回调保留申请目标并清除授权参数（模拟提供�
     }),
   );
   await page.goto("/verifications?request=unavailable-request");
-  await page.getByRole("button", { name: "企业微信登录", exact: true }).click();
+  await page
+    .getByRole("button", { name: "企业微信扫码登录", exact: true })
+    .click();
   await expect(page).toHaveURL(/\/verifications\?request=unavailable-request$/);
   await expect(
     page.getByRole("heading", { name: "待我验证", exact: true }),

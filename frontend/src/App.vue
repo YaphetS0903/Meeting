@@ -1,18 +1,75 @@
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { computed, ref, onMounted, onUnmounted, watch } from "vue";
 import { ElMessage } from "element-plus";
-import { useRouter } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import {
   Document,
   Finished,
   EditPen,
+  Tickets,
   Checked,
-  Warning,
   DataAnalysis,
   Setting,
+  Notebook,
+  ArrowLeft,
 } from "@element-plus/icons-vue";
 import { api, state, loadSession, run } from "./api";
 import { insideWeCom } from "./wecom";
+import WorkspaceNavigation from "./components/WorkspaceNavigation.vue";
+// Desktop navigation remembers one choice; phones use a focus-trapped drawer.
+const navigationKey = "meeting:navigation-mode";
+const compactViewport = window.matchMedia("(max-width: 1440px)");
+const mobileViewport = window.matchMedia("(max-width: 767px)");
+const laptop = ref(compactViewport.matches),
+  mobile = ref(mobileViewport.matches);
+const navigationPreference = ref<string | null>(null);
+const mobileNavigation = ref(false);
+try {
+  navigationPreference.value = localStorage.getItem(navigationKey);
+  if (
+    !navigationPreference.value &&
+    localStorage.getItem("meeting:sidebar-collapsed") === "1"
+  )
+    navigationPreference.value = "compact";
+  else if (
+    !navigationPreference.value &&
+    localStorage.getItem("meeting:sidebar-labels") === "1"
+  )
+    navigationPreference.value = "expanded";
+} catch {
+  /* Preferences are optional. */
+}
+const compactNavigation = computed(() =>
+  navigationPreference.value
+    ? navigationPreference.value === "compact"
+    : laptop.value,
+);
+const navigationExpanded = computed(() =>
+  mobile.value ? mobileNavigation.value : !compactNavigation.value,
+);
+function syncNavigationViewport() {
+  laptop.value = compactViewport.matches;
+  mobile.value = mobileViewport.matches;
+  if (!mobile.value) mobileNavigation.value = false;
+}
+compactViewport.addEventListener("change", syncNavigationViewport);
+mobileViewport.addEventListener("change", syncNavigationViewport);
+onUnmounted(() => {
+  compactViewport.removeEventListener("change", syncNavigationViewport);
+  mobileViewport.removeEventListener("change", syncNavigationViewport);
+});
+function toggleNavigation() {
+  if (mobile.value) {
+    mobileNavigation.value = !mobileNavigation.value;
+    return;
+  }
+  navigationPreference.value = compactNavigation.value ? "expanded" : "compact";
+  try {
+    localStorage.setItem(navigationKey, navigationPreference.value);
+  } catch {
+    /* Navigation still works. */
+  }
+}
 const wecom = ref(false);
 const wecomQr = ref(false);
 const autoLoginKey = "wecom:auto-login-until";
@@ -51,6 +108,7 @@ async function wecomLogin(mode: "oauth" | "qr" = "oauth") {
   }
 }
 const router = useRouter(),
+  route = useRoute(),
   ready = ref(false),
   busy = ref(false),
   username = ref(""),
@@ -66,12 +124,85 @@ const links = [
   ["/meetings", "会议纪要与任务单", Document],
   ["/tasks", "我的待办", Finished],
   ["/assignments", "直接派发任务", EditPen],
+  ["/my-assignments", "我派发的任务", Tickets],
   ["/task-overview", "任务总览", DataAnalysis],
   ["/verifications", "待我验证", Checked],
-  ["/validation", "导入历史会议", Warning],
   ["/reports", "统计报表", DataAnalysis],
   ["/settings", "系统管理", Setting],
+  ["/operation-logs", "操作日志", Notebook],
 ] as const;
+const visibleLinks = computed(() =>
+  links.filter(
+    ([path]) =>
+      (path !== "/settings" || state.me?.is_admin) &&
+      (path !== "/operation-logs" || state.me?.can_view_operation_logs) &&
+      (path !== "/assignments" || state.me?.can_assign_tasks) &&
+      (path !== "/my-assignments" ||
+        (state.me?.can_view_issued_tasks ?? state.me?.can_assign_tasks)) &&
+      (path !== "/task-overview" || state.me?.can_oversee_tasks),
+  ),
+);
+watch(
+  () => route.fullPath,
+  () => {
+    mobileNavigation.value = false;
+  },
+);
+
+const backLocation = computed(() => {
+  const current = route.fullPath;
+  const previous = router.options.history.state.back;
+  if (
+    typeof previous === "string" &&
+    previous.startsWith("/") &&
+    !previous.startsWith("//") &&
+    previous !== current
+  ) {
+    const target = router.resolve(previous);
+    if (
+      (links.some(([path]) => path === target.path) ||
+        target.path === "/settings/employees" ||
+        target.path === "/history-meetings" ||
+        /^\/meetings\/[^/]+$/.test(target.path)) &&
+      !target.query.code &&
+      !target.query.state
+    )
+      return { path: previous, history: true };
+  }
+  if (/^\/meetings\/[^/]+$/.test(route.path)) {
+    const department = route.query.history_department;
+    if (typeof department === "string")
+      return {
+        path: router.resolve({
+          path: "/history-meetings",
+          query: {
+            ...(department === "all" ? {} : { department }),
+            ...(typeof route.query.history_series === "string"
+              ? { series: route.query.history_series }
+              : {}),
+          },
+        }).fullPath,
+        history: false,
+      };
+    if (typeof route.query.series === "string")
+      return {
+        path: router.resolve({
+          path: "/meetings",
+          query: { series: route.query.series },
+        }).fullPath,
+        history: false,
+      };
+  }
+  if (route.path.startsWith("/settings/"))
+    return { path: "/settings", history: false };
+  return current === "/meetings" ? null : { path: "/meetings", history: false };
+});
+async function goBack() {
+  const target = backLocation.value;
+  if (!target) return;
+  if (target.history) router.back();
+  else await router.replace(target.path);
+}
 onMounted(async () => {
   await router.isReady();
   const params = new URLSearchParams(window.location.search);
@@ -177,6 +308,9 @@ async function changePassword() {
   }
 }
 function logout() {
+  void api("/auth/logout", "POST").catch(() => {
+    // Local logout remains available if the session or connection has expired.
+  });
   sessionStorage.removeItem("token");
   sessionStorage.setItem(logoutKey, "1");
   passwordDialog.value = false;
@@ -249,42 +383,82 @@ function logout() {
       </p>
     </form>
   </main>
-  <div v-else class="app-shell">
+  <div
+    v-else
+    class="app-shell"
+    :class="{ 'navigation-compact': compactNavigation }"
+  >
     <a class="skip-link" href="#main">跳至主要内容</a>
-    <aside class="sidebar">
-      <RouterLink class="brand" to="/meetings"
-        ><span class="brand-mark">M</span
-        ><span>会议协同<small>纪要 · 任务 · 验证</small></span></RouterLink
-      >
-      <p class="nav-label">工作空间</p>
-      <nav aria-label="主导航">
-        <RouterLink
-          v-for="[path, label, icon] in links.filter(
-            (x) =>
-              (x[0] !== '/settings' || state.me.is_admin) &&
-              (x[0] !== '/assignments' || state.me.can_assign_tasks) &&
-              (x[0] !== '/task-overview' || state.me.can_oversee_tasks) &&
-              (x[0] !== '/validation' ||
-                state.me.is_admin ||
-                state.me.can_correct_history),
-          )"
-          :key="path"
-          :to="path"
-          ><el-icon><component :is="icon" /></el-icon
-          ><span>{{ label }}</span></RouterLink
+    <button
+      v-if="!mobile"
+      class="navigation-trigger navigation-edge-trigger"
+      type="button"
+      :aria-label="navigationExpanded ? '收起导航栏' : '展开导航栏'"
+      :title="navigationExpanded ? '收起导航栏' : '展开导航栏'"
+      :aria-expanded="navigationExpanded"
+      aria-controls="workspace-navigation"
+      @click="toggleNavigation"
+    >
+      <svg class="navigation-edge-shape" viewBox="0 0 24 72" aria-hidden="true">
+        <path d="M0 0C0 14 24 10 24 26V46C24 62 0 58 0 72Z" />
+      </svg>
+      <svg class="navigation-edge-arrow" viewBox="0 0 16 16" aria-hidden="true">
+        <path d="M10 3.5 5.5 8 10 12.5Z" />
+      </svg>
+    </button>
+    <aside class="sidebar" v-if="!mobile">
+      <RouterLink class="brand" to="/meetings" aria-label="会议协同首页">
+        <span class="brand-mark">M</span>
+        <span class="brand-title"
+          >会议协同<small>纪要 · 任务 · 验证</small></span
         >
-      </nav>
-      <div class="sidebar-note">
-        <span class="live-dot" /> 历史考核独立留存
-        <p>任务延期不改写已发布结果</p>
-      </div>
+      </RouterLink>
+      <p class="nav-label">工作空间</p>
+      <WorkspaceNavigation id="workspace-navigation" :links="visibleLinks" />
     </aside>
     <div class="workspace">
       <header class="topbar">
-        <span>部门协作工作台</span>
-        <div>
+        <div class="topbar-leading">
+          <button
+            v-if="mobile"
+            class="navigation-trigger"
+            type="button"
+            :aria-label="navigationExpanded ? '收起导航栏' : '展开导航栏'"
+            :title="navigationExpanded ? '收起导航栏' : '展开导航栏'"
+            :aria-expanded="navigationExpanded"
+            :aria-controls="
+              mobile ? 'mobile-workspace-navigation' : 'workspace-navigation'
+            "
+            @click="toggleNavigation"
+          >
+            <svg
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.8"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <rect x="3" y="3" width="18" height="18" rx="2" />
+              <path d="M9 3v18" />
+            </svg>
+          </button>
+          <el-button
+            class="workspace-back"
+            :icon="ArrowLeft"
+            :disabled="!backLocation"
+            :title="backLocation ? '返回上一页' : '当前已是会议列表首页'"
+            @click="run(goBack)"
+            >返回</el-button
+          >
+          <span class="workspace-label">部门协作工作台</span>
+        </div>
+        <div class="topbar-account">
           <span class="avatar">{{ state.me.name.slice(0, 1) }}</span>
-          {{ state.me.name }}
+          <span class="workspace-user-name">{{ state.me.name }}</span>
           <el-button
             v-if="state.me.has_password"
             text
@@ -295,8 +469,31 @@ function logout() {
         </div>
       </header>
       <main id="main" tabindex="-1"><RouterView /></main>
-      <footer>统一使用北京时间 · 周一至周日为一个自然周</footer>
     </div>
+    <el-drawer
+      v-model="mobileNavigation"
+      class="navigation-drawer"
+      title="工作空间"
+      direction="ltr"
+      size="min(280px, calc(100vw - 48px))"
+      :append-to-body="true"
+    >
+      <RouterLink
+        class="brand"
+        to="/meetings"
+        @click="mobileNavigation = false"
+      >
+        <span class="brand-mark">M</span
+        ><span class="brand-title"
+          >会议协同<small>纪要 · 任务 · 验证</small></span
+        >
+      </RouterLink>
+      <WorkspaceNavigation
+        id="mobile-workspace-navigation"
+        :links="visibleLinks"
+        @navigate="mobileNavigation = false"
+      />
+    </el-drawer>
     <el-dialog
       v-model="passwordDialog"
       title="修改密码"

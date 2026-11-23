@@ -4,12 +4,24 @@ version = "0.1.0"
 description = "会议纪要、共同任务验证与历史考核"
 requires-python = ">=3.12"
 dependencies = [
-  "fastapi>=0.115,<1", "uvicorn[standard]>=0.30,<1",
-  "sqlalchemy>=2.0,<3", "psycopg[binary]>=3.2,<4", "alembic>=1.14,<2",
-  "pydantic-settings>=2.6,<3", "python-multipart>=0.0.20,<1",
-  "httpx>=0.28,<1", "PyJWT>=2.10,<3", "pwdlib[argon2]>=0.2,<1",
-  "celery[redis]>=5.4,<6", "openpyxl>=3.1,<4", "xlrd>=2.0.2,<3",
-  "python-docx>=1.1,<2", "reportlab>=4.2,<5", "email-validator>=2.2,<3",
+  "fastapi>=0.115,<1",
+  "uvicorn[standard]>=0.30,<1",
+  "sqlalchemy>=2.0,<3",
+  "psycopg[binary]>=3.2,<4",
+  "alembic>=1.14,<2",
+  "pydantic-settings>=2.6,<3",
+  "python-multipart>=0.0.20,<1",
+  "httpx>=0.28,<1",
+  "PyJWT>=2.10,<3",
+  "pwdlib[argon2]>=0.2,<1",
+  "celery[redis]>=5.4,<6",
+  "openpyxl>=3.1,<4",
+  "xlrd>=2.0.2,<3",
+  "python-docx>=1.1,<2",
+  "reportlab>=4.2,<5",
+  "email-validator>=2.2,<3",
+  "pypdfium2>=4.30,<6",
+  "pillow>=11,<13",
 ]
 
 [dependency-groups]

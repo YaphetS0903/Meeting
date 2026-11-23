@@ -143,6 +143,8 @@ function pageHarness(t, name, handleApi, initialId = "A", confirm) {
           },
         };
       if (specifier === "../api") return apiModule;
+      if (specifier === "../time")
+        return { beijingTime: (value) => value || "—" };
       if (specifier.endsWith(".vue") || specifier === "../workContent")
         return {};
       throw Error(`Unexpected dependency: ${specifier}`);

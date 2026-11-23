@@ -1,5 +1,7 @@
+import re
 from io import BytesIO
 from unittest.mock import Mock
+from urllib.parse import unquote
 
 import openpyxl
 import pytest
@@ -37,6 +39,7 @@ def test_exports_immutable_and_literal_cells(tmp_path, db, team, draft_factory, 
     publish(db, team["host"], meeting.id, PublishRequest(expected_version=1))
     files = generate_exports(db, meeting.id, 1)
     assert {x.kind for x in files} == {"minutes_xlsx", "tasks_xlsx", "minutes_pdf"}
+    assert all("-V1-" not in x.filename for x in files)
     assert [x.id for x in generate_exports(db, meeting.id, 1)] == [x.id for x in files]
     xlsx = next(x for x in files if x.kind == "tasks_xlsx")
     w = openpyxl.load_workbook(tmp_path / xlsx.storage_key)
@@ -63,9 +66,55 @@ def test_pdf_long_chinese_text_not_truncated():
     }
     pdf = PdfReader(BytesIO(pdf_minutes(snapshot)))
     assert len(pdf.pages) > 2
-    assert "最终验收标记" in "".join(p.extract_text() for p in pdf.pages)
+    output = "".join("".join(p.extract_text().split()) for p in pdf.pages)
+    # The final marker may span pages; strip running furniture before checking continuity.
+    output = re.sub(r"第\d+页", "", output)
+    output = output.replace("序号具体工作任务内容（写清标准、要求）责任人计划完成时间任务闭环完成结果备注", "")
+    assert "最终验收标记" in output
     w = openpyxl.load_workbook(BytesIO(xlsx_minutes(snapshot, True)))
     assert "最终验收标记" in "".join(str(row[2].value or "") for row in w.active)
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_download_names_hide_only_generated_revision_suffixes(
+    db, team, draft_factory, tmp_path, monkeypatch, legacy
+):
+    monkeypatch.setattr(get_settings(), "storage_dir", tmp_path)
+    draft = draft_factory()
+    draft.title = "技术规范-V1"
+    meeting = create_meeting(db, team["host"], draft)
+    publish(db, team["host"], meeting.id, PublishRequest(expected_version=1))
+    files = generate_exports(db, meeting.id, 1)
+    expected_names = {a.id: a.filename for a in files}
+    assert set(expected_names.values()) == {
+        "技术规范-V1-纪要.xlsx", "技术规范-V1-任务单.xlsx", "技术规范-V1-纪要.pdf",
+    }
+    if legacy:
+        for attachment in files:
+            attachment.filename = attachment.filename.replace("-V1-", "-V1-V1-")
+        db.flush()
+    stored_names = {a.id: a.filename for a in files}
+    headers = {"Authorization": "Bearer " + issue_token(team["host"])}
+    app.dependency_overrides[get_db] = lambda: db
+    try:
+        with TestClient(app) as client:
+            for attachment in files:
+                fmt = {"minutes_xlsx": "xlsx", "tasks_xlsx": "tasks", "minutes_pdf": "pdf"}[attachment.kind]
+                for url in (
+                    "/api/files/" + attachment.id,
+                    f"/api/meetings/{meeting.id}/export/{fmt}",
+                ):
+                    response = client.get(url, headers=headers)
+                    assert response.status_code == 200, response.text
+                    assert expected_names[attachment.id] in unquote(response.headers["content-disposition"])
+            from app.services.exports import attachment_filename
+
+            # An uploaded filename containing V1 is user content, not a system label.
+            upload = Attachment(filename="技术规范-V1-V1-纪要.pdf", kind="attachment", meeting_version=1)
+            assert attachment_filename(upload, db) == upload.filename
+        assert {a.id: a.filename for a in files} == stored_names
+    finally:
+        app.dependency_overrides.clear()
 
 
 def test_legacy_acceptance_requirement_is_not_shown_in_new_exports():

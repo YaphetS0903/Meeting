@@ -4,7 +4,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
 from app import worker
-from app.models import OutboxEvent, Task
+from app.models import OutboxEvent, SystemSetting, Task
 from app.schemas import ApplyCompletion, PublishRequest
 from app.services import integrations
 from app.services.business import apply_completion, create_meeting, publish
@@ -16,6 +16,10 @@ def test_daily_digest_groups_by_verifier_rechecks_versions_and_deduplicates(
     clock = datetime(2026, 9, 21, 1, tzinfo=timezone.utc)
     monkeypatch.setattr(worker, "now", lambda: clock)
     monkeypatch.setattr("app.models.now", lambda: clock)
+    db.add(SystemSetting(key="reminders", value={
+        "daily_enabled": True, "enabled": True, "hour": 9,
+        "before_days": 1, "overdue_enabled": True, "verification_hours": 24,
+    }))
     requests, tasks = [], []
     for index, verifier in enumerate(["host", "host", "host", "colleague"]):
         draft = draft_factory()
@@ -52,7 +56,7 @@ def test_daily_digest_groups_by_verifier_rechecks_versions_and_deduplicates(
     calls = []
 
     class Provider:
-        def send(self, users, text):
+        def send(self, users, text, *, card=None):
             calls.append((users, text))
             return {"msgid": "digest-test"}
 

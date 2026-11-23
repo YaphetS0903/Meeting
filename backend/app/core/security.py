@@ -45,10 +45,18 @@ def current_user(
         raise HTTPException(401, "账号已停用")
     if payload.get("auth_version", 0) != (user.auth_version or 0):
         raise HTTPException(401, "密码已变更，请重新登录")
+    from app.services.operation_logs import set_actor
+    set_actor(user)
     return user
 
 
 def admin_user(user: User = Depends(current_user)) -> User:
     if not user.is_admin:
         raise HTTPException(403, "需要管理员权限")
+    return user
+
+
+def operation_log_user(user: User = Depends(admin_user)) -> User:
+    if user.username != "admin":
+        raise HTTPException(403, "操作日志仅限 admin 账号查看")
     return user

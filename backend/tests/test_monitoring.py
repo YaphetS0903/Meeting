@@ -107,6 +107,57 @@ def test_database_and_redis_outage_still_produce_sanitized_alert(config):
     assert len(sent) == 1 and "secret" not in json.dumps(sent)
 
 
+def test_failed_import_keeps_history_without_repeating_system_alerts(db, config):
+    event = OutboxEvent(
+        event_key="meeting-sheet:recognition-failed", channel="import", payload={},
+        state="failed", attempts=1, last_error="本页未完整识别，请上传更清晰的文件后重试",
+    )
+    db.add(event)
+    heartbeat(db, MOMENT)
+    db.commit()
+    factory = sessionmaker(db.bind)
+    for elapsed in (0, 61, 121):
+        current = MOMENT + timedelta(minutes=elapsed)
+        with factory.begin() as session:
+            heartbeat(session, current)
+        result = collect(factory, config, current, ping=lambda: None)
+        assert result["healthy"]
+        assert result["queue_counts"]["failed"] == 1
+        update_alert(result, config, current, sender=lambda *_: pytest.fail("must not send import alert"))
+    db.refresh(event)
+    assert event.state == "failed" and event.attempts == 1
+    assert event.last_error == "本页未完整识别，请上传更清晰的文件后重试"
+
+
+@pytest.mark.parametrize("channel", ["email", "wecom", "export", "unknown"])
+def test_failed_import_does_not_hide_other_failed_work(db, config, channel):
+    db.add_all([
+        OutboxEvent(event_key="import-failure", channel="import", payload={}, state="failed"),
+        OutboxEvent(event_key="operational-failure", channel=channel, payload={}, state="failed"),
+    ])
+    heartbeat(db, MOMENT)
+    db.commit()
+    result = collect(sessionmaker(db.bind), config, MOMENT, ping=lambda: None)
+    assert result["issues"] == [{
+        "code": "delivery_failed", "label": "明确失败", "healthy": False, "detail": "1 条待处理",
+    }]
+    sent = []
+    update_alert(result, config, MOMENT, sender=lambda c, p: sent.append(p))
+    assert len(sent) == 1 and sent[0]["type"] == "incident"
+
+
+@pytest.mark.parametrize("state,code", [("pending", "queue_overdue"), ("sending", "queue_stuck")])
+def test_import_queue_stalls_are_still_operational_failures(db, config, state, code):
+    db.add(OutboxEvent(
+        event_key="stalled-import", channel="import", payload={}, state=state,
+        available_at=MOMENT - timedelta(minutes=20), claimed_at=MOMENT - timedelta(minutes=20),
+    ))
+    heartbeat(db, MOMENT)
+    db.commit()
+    result = collect(sessionmaker(db.bind), config, MOMENT, ping=lambda: None)
+    assert {issue["code"] for issue in result["issues"]} == {code}
+
+
 def test_stale_backup_and_storage_failure_detected_independently(db, config):
     with sessionmaker(db.bind).begin() as session:
         heartbeat(session, MOMENT)

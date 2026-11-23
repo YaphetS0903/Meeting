@@ -16,9 +16,20 @@ def get_db():
     with SessionLocal() as session:
         try:
             yield session
+            from app.services.operation_logs import finish_request
+            finish_request(session)
             session.commit()
-        except Exception:
+        except Exception as error:
             session.rollback()
+            # Keep rejected operations after rolling back their business changes.
+            try:
+                from app.services.operation_logs import finish_request
+                finish_request(session, error)
+                session.commit()
+            except Exception:
+                session.rollback()
+                import logging
+                logging.getLogger(__name__).exception("Could not persist rejected operation")
             raise
 
 

@@ -1,3 +1,4 @@
+from html.parser import HTMLParser
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -7,6 +8,17 @@ from app.models import OutboxEvent, Task
 from app.schemas import ApplyCompletion, PublishRequest, VerifyCompletion
 from app.services import integrations
 from app.services.business import apply_completion, create_meeting, publish, verify_completion
+
+
+def message_link(content):
+    class Links(HTMLParser):
+        def handle_starttag(self, tag, attrs):
+            assert tag == "a"
+            self.url = dict(attrs)["href"]
+
+    parser = Links()
+    parser.feed(content)
+    return parser.url
 
 
 @pytest.mark.parametrize("content", ["验收要求需要逐项确认。" * 300, "中文🚀é" * 1000, "A" * 9000])
@@ -25,16 +37,16 @@ def test_long_messages_fit_provider_bytes_and_keep_deadline_source_and_full_link
     sent = []
 
     class Provider:
-        def send(self, users, text):
+        def send(self, users, text, *, card=None):
             assert len(text.encode("utf-8")) <= 2048
             sent.append(text)
             return {"msgid": "test"}
 
     monkeypatch.setattr(integrations, "WeCom", Provider)
     integrations.send_wecom(db, event)
-    assert "截止日期：2026-08-17" in sent[0] and "会议来源：很长的会议名称" in sent[0]
+    assert "计划完成日期：2026-08-17" in sent[0] and "来源会议：很长的会议名称" in sent[0]
     assert (
-        sent[0].splitlines()[-1]
+        message_link(sent[0])
         == integrations.get_settings().public_url.rstrip("/") + "/tasks?id=" + task.id
     )
     assert "�" not in sent[0] and task.content == content
@@ -50,7 +62,7 @@ def test_reapplication_has_distinct_actionable_link_instead_of_provider_duplicat
     sent = []
 
     class Provider:
-        def send(self, users, text):
+        def send(self, users, text, *, card=None):
             sent.append(text)
             return {"msgid": "test"}
 
@@ -73,5 +85,5 @@ def test_reapplication_has_distinct_actionable_link_instead_of_provider_duplicat
     event = db.scalar(select(OutboxEvent).where(OutboxEvent.event_key == f"request:{second.id}:verify"))
     integrations.send_wecom(db, event)
     assert sent[0] != sent[1]
-    assert parse_qs(urlparse(sent[0].splitlines()[-1]).query)["request"] == [first.id]
-    assert parse_qs(urlparse(sent[1].splitlines()[-1]).query)["request"] == [second.id]
+    assert parse_qs(urlparse(message_link(sent[0])).query)["request"] == [first.id]
+    assert parse_qs(urlparse(message_link(sent[1])).query)["request"] == [second.id]

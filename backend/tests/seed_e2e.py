@@ -100,4 +100,6 @@ with SessionLocal.begin() as db:
         historical=True,
     )
     publish(db, user, historic.id, PublishRequest(expected_version=1, notify=False))
+    create_meeting(db, user, MeetingDraft(title="浏览器验收草稿", department_id=department.id,
+        series_id=series.id, host_id=user.id, recorder_id=user.id, meeting_date=date.today(), items=[]))
 print("Isolated browser fixture ready")

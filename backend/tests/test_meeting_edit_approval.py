@@ -12,7 +12,9 @@ from app.services.business import create_meeting, publish
 def test_meeting_approval_and_delete_rights(db, team, draft_factory):
     host = team["host"]
     host.is_admin = False
-    meeting = create_meeting(db, host, draft_factory())
+    from app.models import MeetingAttendee
+    draft=draft_factory();draft.attendee_ids=[team["colleague"].id]
+    meeting = create_meeting(db, host, draft)
     publish(db, host, meeting.id, PublishRequest(expected_version=1, notify=False))
     db.flush()
     task_id = db.scalar(select(Task.id).where(Task.source_meeting_id == meeting.id))
@@ -50,7 +52,7 @@ def test_meeting_approval_and_delete_rights(db, team, draft_factory):
             assert client.get(f"/api/tasks/{task_id}", headers=attendee).json()["can_edit"] is True
             assert client.get(f"/api/meetings/{meeting.id}/deletion-impact", headers=attendee).status_code == 403
             assert client.delete(f"/api/meetings/{meeting.id}", headers=attendee).status_code == 403
-            assert client.get(f"/api/meetings/{meeting.id}/deletion-impact", headers=chair).status_code == 200
+            assert client.get(f"/api/meetings/{meeting.id}/deletion-impact", headers=chair).status_code == 403
             followup = client.post(f"/api/meetings/{meeting.id}/continue", headers=attendee)
             assert followup.status_code == 200, followup.text
             assert followup.json()["host_id"] == host.id

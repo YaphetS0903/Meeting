@@ -34,7 +34,7 @@ def test_unpublished_attachments_hidden_from_department_readers(
     try:
         with TestClient(app) as client:
             headers = {"Authorization": "Bearer " + issue_token(team["a"])}
-            assert client.get(f"/api/meetings/{meeting.id}", headers=headers).json()["attachments"] == []
+            assert client.get(f"/api/meetings/{meeting.id}", headers=headers).status_code == 403
             assert client.get(f"/api/files/{attachment.id}", headers=headers).status_code == 403
             meeting.draft = {**meeting.draft, "attachment_ids": [attachment.id]}
             publish(db, team["host"], meeting.id, PublishRequest(expected_version=1))

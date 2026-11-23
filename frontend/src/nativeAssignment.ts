@@ -78,8 +78,7 @@ export async function confirmAssignedTodo(
   if (!insideWeCom())
     return {
       state: "unavailable",
-      message:
-        "任务已派发，责任人会收到应用消息。绑定企微的派发人会收到确认卡片，在企微打开后即可确认原生待办。",
+      message: "任务已派发。在企业微信中打开任务，可查看原生待办确认入口。",
     };
   let attemptId = "";
   let created = false;
@@ -110,9 +109,7 @@ export async function confirmAssignedTodo(
     if (!info.enabled || !info.can_create)
       return {
         state: "unavailable",
-        message:
-          info.reason ||
-          "任务已派发，应用消息会自动发送；当前无法确认原生待办。",
+        message: info.reason || "任务已派发；当前无法确认原生待办。",
       };
     await ensureWeComTodo();
     const prepared = await api(

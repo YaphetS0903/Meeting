@@ -14,11 +14,38 @@ from app.services.business import apply_completion, change_task, create_meeting,
 from app.services.integrations import NotConfigured
 
 
+def test_meeting_app_channel_requires_confirmation_and_does_not_fall_back_to_cli(
+    db, team, draft_factory, monkeypatch,
+):
+    configure_pilot(monkeypatch, team)
+    settings = get_settings()
+    monkeypatch.setattr(settings, "native_todo_app_enabled", True)
+    monkeypatch.setattr(settings, "native_todo_all_active_users", True)
+    calls = []
+
+    def provider(*arguments, payload, **_):
+        calls.append((arguments, payload))
+        return {"items": [{"success": True, "todo_id": "meeting-automatic-todo"}]}
+
+    monkeypatch.setattr(native_todo, "_run", provider)
+    meeting = create_meeting(db, team["host"], draft_factory())
+    publish(db, team["host"], meeting.id, PublishRequest(expected_version=1))
+    assert event(db, "create") is None
+    task = db.scalar(select(Task))
+    old_event = SimpleNamespace(payload={"task_id": task.id, "task_version": 1, "action": "create"})
+    assert "skipped" in native_todo.send_native_todo(db, old_event)
+    assert calls == [] and db.scalar(select(NativeTodoLink)) is None
+    # Retrying publication of an already committed draft cannot create another event.
+    publish(db, team["host"], meeting.id, PublishRequest(expected_version=1))
+    assert not list(db.scalars(select(OutboxEvent).where(OutboxEvent.channel == "native_todo")))
+
+
 def configure_pilot(monkeypatch, team, *, mapped=True):
     settings = get_settings()
     monkeypatch.setattr(settings, "native_todo_enabled", True)
     monkeypatch.setattr(settings, "native_todo_direct_enabled", True)
     monkeypatch.setattr(settings, "native_todo_meeting_enabled", True)
+    monkeypatch.setattr(settings, "native_todo_app_enabled", False)
     monkeypatch.setattr(settings, "native_todo_all_active_users", False)
     monkeypatch.setattr(settings, "native_todo_allowed_wecom_ids", "wecom-a")
     team["a"].wecom_id = "wecom-a"

@@ -7,9 +7,10 @@ import smtplib
 import ssl
 import time
 from contextlib import contextmanager
+from email.headerregistry import Address
 from email.message import EmailMessage
-from email.utils import formatdate
-from html import escape
+from email.utils import formatdate, parseaddr
+from html import escape, unescape
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 import httpx
@@ -18,9 +19,10 @@ from redis import Redis
 from sqlalchemy import delete, select
 
 from app.core.config import get_settings
+from app.core.db import locked_get
 from app.models import Department, Membership, Task, User
 from app.services.access import can_assign_companywide, has_department_assignment_role
-from app.services.exports import generate_exports
+from app.services.exports import attachment_filename, generate_mail_exports
 
 # httpx logs request URLs at INFO by default. Enterprise credentials are passed as
 # query parameters to the WeCom API, so those URLs must never reach service logs.
@@ -69,17 +71,56 @@ def truncate_escaped_utf8(value, byte_limit):
     return "".join(fragments) + marker
 
 
-def wecom_text(title, body, url, *, due_date=None, source_title=None):
-    """WeCom text content is limited to 2048 UTF-8 bytes, including the complete link."""
-    prefix = truncate_utf8(title, 180) + "\n"
-    footer = ("\n截止日期：" + due_date.isoformat()) if due_date else ""
+def wecom_text(title, body, url, *, due_date=None, source_title=None, action="查看任务", details=()):
+    """Native text with a single named link; escape user text independently of markup."""
+    prefix = "【" + truncate_escaped_utf8(title, 180) + "】\n\n"
+    footer = "".join("\n" + escape(line) for line in details)
+    footer += ("\n计划完成日期：" + due_date.isoformat()) if due_date else ""
     if source_title:
-        footer += "\n会议来源：" + truncate_utf8(source_title, 240)
-    footer += "\n" + url
+        footer += "\n来源会议：" + truncate_escaped_utf8(source_title, 240)
+    footer += '\n\n<a href="' + escape(url, quote=True) + '">' + escape(action) + '</a>'
     budget = 2048 - len((prefix + footer).encode("utf-8"))
     if budget < 64:
         raise NotConfigured("应用访问地址过长，无法生成完整企业微信消息链接")
-    return prefix + truncate_utf8(body, budget) + footer
+    return prefix + truncate_escaped_utf8(body, budget) + footer
+
+
+def notification_card(title, lines, url, button):
+    """Escape user text and keep complete links outside the bounded description."""
+    remaining, fragments = 512, []
+    for line in lines:
+        separator = "<br>" if fragments else ""
+        budget = remaining - len(separator.encode("utf-8"))
+        if budget < 3:
+            break
+        fragment = truncate_escaped_utf8(str(line), budget)
+        fragments.append(separator + fragment)
+        remaining -= len((separator + fragment).encode("utf-8"))
+    return {"title": truncate_utf8(title, 120), "description": "".join(fragments),
+            "url": url, "btntxt": button}
+
+
+def card_text(value, budget):
+    return unescape(truncate_escaped_utf8(" ".join(value.split()), budget))
+
+
+def deadline_message(tasks, day, url):
+    lines = [f"提醒日期：{day.isoformat()}", f"今日需提醒你 {len(tasks)} 项任务"]
+    shown, number = tasks[:3], 0
+    for delta, label in [(0, "今天到期"), (1, "明天到期"), (2, "后天到期")]:
+        group = [task for task in tasks if (task.due_date - day).days == delta]
+        if not group:
+            continue
+        visible = [task for task in shown if task in group]
+        if not visible:
+            continue
+        lines.extend(["", f"{label} · {len(group)}项"])
+        for task in visible:
+            number += 1
+            lines.append(f"{number}. " + card_text(task.content, 180))
+    if len(tasks) > 3:
+        lines.extend(["", f"另有 {len(tasks) - 3} 项，点击查看全部"])
+    return wecom_text("任务到期提醒", "\n".join(lines), url, action="查看全部提醒任务")
 
 
 def redis_client():
@@ -91,12 +132,21 @@ class WeCom:
         self.config = get_settings()
         self.directory = directory
         self.secret = self.config.wecom_directory_secret if directory else self.config.wecom_secret
-        if not self.config.wecom_corp_id or not self.secret or (not directory and not self.config.wecom_agent_id):
+        if (
+            not self.config.wecom_corp_id
+            or not self.secret
+            or (not directory and not self.config.wecom_agent_id)
+        ):
             raise NotConfigured("企业微信通讯录同步凭据未配置" if directory else "企业微信自建应用尚未配置")
 
     def token(self):
         cache = redis_client()
-        key = "wecom:token:" + self.config.wecom_corp_id + ":" + hashlib.sha256(self.secret.encode()).hexdigest()
+        key = (
+            "wecom:token:"
+            + self.config.wecom_corp_id
+            + ":"
+            + hashlib.sha256(self.secret.encode()).hexdigest()
+        )
         cached = cache.get(key)
         if cached:
             return cached
@@ -124,7 +174,8 @@ class WeCom:
                     "GET" if body is None else "POST",
                     "https://qyapi.weixin.qq.com/cgi-bin/" + path,
                     params={"access_token": token, **(params or {})},
-                    json=body, timeout=20,
+                    json=body,
+                    timeout=20,
                 )
                 result.raise_for_status()
                 data = result.json()
@@ -132,7 +183,12 @@ class WeCom:
                 error = DeliveryUncertain if write else ProviderRejected
                 raise error("企业微信响应不明确，请稍后核实或重试") from exc
             if data.get("errcode") in {40014, 42001} and attempt == 0:
-                key = "wecom:token:" + self.config.wecom_corp_id + ":" + hashlib.sha256(self.secret.encode()).hexdigest()
+                key = (
+                    "wecom:token:"
+                    + self.config.wecom_corp_id
+                    + ":"
+                    + hashlib.sha256(self.secret.encode()).hexdigest()
+                )
                 redis_client().delete(key)
                 continue
             break
@@ -144,11 +200,20 @@ class WeCom:
         parsed = urlsplit(url)
         public = urlsplit(self.config.public_url)
         if (
-            parsed.scheme != public.scheme or parsed.netloc != public.netloc
-            or parsed.username or parsed.password or parsed.fragment
+            parsed.scheme != public.scheme
+            or parsed.netloc != public.netloc
+            or parsed.username
+            or parsed.password
+            or parsed.fragment
         ):
             raise ProviderRejected("只能为系统当前访问域名签名，请从企业微信工作台打开系统")
-        key = "wecom:ticket:" + self.config.wecom_corp_id + ":" + hashlib.sha256(self.secret.encode()).hexdigest() + (":agent" if agent else ":corp")
+        key = (
+            "wecom:ticket:"
+            + self.config.wecom_corp_id
+            + ":"
+            + hashlib.sha256(self.secret.encode()).hexdigest()
+            + (":agent" if agent else ":corp")
+        )
         cache = redis_client()
         ticket = cache.get(key)
         if not ticket:
@@ -156,12 +221,18 @@ class WeCom:
             with cache.lock(key + ":lock", timeout=50, blocking_timeout=45):
                 ticket = cache.get(key)
                 if not ticket:
-                    data = self.get("ticket/get", type="agent_config") if agent else self.get("get_jsapi_ticket")
+                    data = (
+                        self.get("ticket/get", type="agent_config") if agent else self.get("get_jsapi_ticket")
+                    )
                     ticket = data["ticket"]
                     cache.setex(key, max(60, int(data["expires_in"]) - 120), ticket)
         timestamp, nonce = int(time.time()), secrets.token_hex(16)
         value = f"jsapi_ticket={ticket}&noncestr={nonce}&timestamp={timestamp}&url={url}"
-        return {"timestamp": timestamp, "nonceStr": nonce, "signature": hashlib.sha1(value.encode()).hexdigest()}
+        return {
+            "timestamp": timestamp,
+            "nonceStr": nonce,
+            "signature": hashlib.sha1(value.encode()).hexdigest(),
+        }
 
     def send(self, ids, content, *, card=None):
         if self.directory:
@@ -198,9 +269,9 @@ def sync_directory(db):
     if get_settings().wecom_directory_secret:
         directory_provider = WeCom(directory=True)
         for department in departments:
-            for item in directory_provider.get(
-                "user/list", department_id=department["id"], fetch_child=0
-            )["userlist"]:
+            for item in directory_provider.get("user/list", department_id=department["id"], fetch_child=0)[
+                "userlist"
+            ]:
                 directory_users[item["userid"]] = item
     direct_user_ids = {
         item["userid"] for item in (app.get("allow_userinfos") or {}).get("user", []) if item.get("userid")
@@ -228,7 +299,9 @@ def sync_directory(db):
             db.flush()
         user.name = remote["name"]
         details = directory_users.get(remote["userid"], remote)
-        remote_email = details.get("biz_mail") or details.get("email") or remote.get("biz_mail") or remote.get("email")
+        remote_email = (
+            details.get("biz_mail") or details.get("email") or remote.get("biz_mail") or remote.get("email")
+        )
         if remote_email:
             user.email = remote_email
         if details.get("mobile"):
@@ -277,7 +350,8 @@ def oauth_destination(value):
         or parsed.netloc
         or parsed.fragment
         or not re.fullmatch(
-            r"/(tasks|task-overview|assignments|verifications|meetings(?:/[A-Za-z0-9-]+)?|reports|validation|settings)", parsed.path
+            r"/(tasks|task-overview|assignments|verifications|meetings(?:/[A-Za-z0-9-]+)?|reports|validation|settings|operation-logs)",
+            parsed.path,
         )
     ):
         raise HTTPException(422, "登录仅能返回系统内页面")
@@ -312,14 +386,16 @@ def oauth_url(return_to="/tasks", mode="oauth"):
     token = secrets.token_urlsafe(32)
     redis_client().setex("oauth:" + token, 600, json.dumps({"return_to": return_to}))
     if mode == "qr":
-        return "https://login.work.weixin.qq.com/wwlogin/sso/login?" + urlencode({
-            "login_type": "CorpApp",
-            "appid": settings.wecom_corp_id,
-            "agentid": settings.wecom_agent_id,
-            "redirect_uri": settings.public_url.rstrip("/") + "/tasks",
-            "state": token,
-            "lang": "zh",
-        }), token
+        return "https://login.work.weixin.qq.com/wwlogin/sso/login?" + urlencode(
+            {
+                "login_type": "CorpApp",
+                "appid": settings.wecom_corp_id,
+                "agentid": settings.wecom_agent_id,
+                "redirect_uri": settings.public_url.rstrip("/") + "/tasks",
+                "state": token,
+                "lang": "zh",
+            }
+        ), token
     url = (
         "https://open.weixin.qq.com/connect/oauth2/authorize?"
         + urlencode(
@@ -404,6 +480,59 @@ def send_wecom(db, event):
     if not notification_enabled(db, "wecom", event.payload):
         return {"skipped": "该来源的外部提醒已关闭，未发送且不会补发"}
     p = event.payload
+    if p.get("deadline_reminder"):
+        from app.models import now
+        from app.services.deadline_reminders import CHINA, digest_tasks
+
+        current = now().astimezone(CHINA)
+        recipients = p.get("user_ids", [])
+        if (
+            current.hour < 9
+            or p.get("reminder_day") != current.date().isoformat()
+            or len(recipients) != 1
+        ):
+            return {"skipped": "任务已完成、关闭、调整或提醒日期已过"}
+        tasks = digest_tasks(db, p, recipients[0], lock=True)
+        if not tasks:
+            return {"skipped": "任务已完成、关闭、调整或提醒日期已过"}
+        user = db.get(User, recipients[0])
+        url = get_settings().public_url.rstrip("/") + "/tasks?" + urlencode({"reminder_day": p["reminder_day"]})
+        # Old individual events still open the task directly; new digests have a fixed personal list.
+        if "deadline_items" not in p:
+            url = get_settings().public_url.rstrip("/") + "/tasks?" + urlencode({"id": tasks[0].id})
+        content = deadline_message(tasks, current.date(), url)
+        result = WeCom().send([user.wecom_id], content)
+        return {**result, "reminder_day": p["reminder_day"], "task_ids": [task.id for task in tasks]}
+    if p.get("meeting_publication"):
+        from app.models import Meeting, MeetingVersion
+        from app.services.access import meeting_access
+
+        meeting = locked_get(db, Meeting, p.get("meeting_id"))
+        if not meeting or meeting.historical or meeting.published_version != p.get("version"):
+            return {"skipped": "会议已删除、归为历史或纪要已有更新版本"}
+        version = db.scalar(
+            select(MeetingVersion).where(
+                MeetingVersion.meeting_id == meeting.id,
+                MeetingVersion.number == p["version"],
+            )
+        )
+        if not version:
+            return {"skipped": "会议发布版本已不存在"}
+        if p.get("shared_recipients") and p.get("user_ids") != version.snapshot.get(
+            "notification_recipient_ids"
+        ):
+            raise NotConfigured("通知名单与已发布版本不一致，请核对发送记录")
+        users = [db.get(User, identifier) for identifier in p.get("user_ids", [])]
+        if not users or any(not user or not user.active or not user.wecom_id for user in users):
+            raise NotConfigured("收件人未绑定企业微信或已停用，请同步并重新指派")
+        for user in users:
+            meeting_access(db, user, meeting)
+        snapshot = version.snapshot
+        title = "会议纪要已更新" if p["version"] > 1 else "会议纪要已发布"
+        url = get_settings().public_url.rstrip("/") + "/meetings/" + meeting.id
+        content = wecom_text(title, f"会议名称：{snapshot['title']}", url, action="查看会议任务单",
+                             details=[f"会议日期：{snapshot['meeting_date']}"])
+        return WeCom().send([user.wecom_id for user in users], content)
     if "verification_request_ids" in p:
         tasks = pending_verification_tasks(db, p)
         if not tasks:
@@ -412,16 +541,18 @@ def send_wecom(db, event):
         p = {**p, "content": f"共 {len(tasks)} 项待验证，请进入应用查看全部。\n" + "\n".join(lines)}
     if p.get("reminder_task_ids"):
         from app.models import SystemSetting
-        from app.services.business import owner_ids, today
+        from app.services.business import effective_terminal_review_task_ids, owner_ids, today
 
         setting = db.get(SystemSetting, "reminders")
         config = setting.value if setting else {"before_days": 1, "overdue_enabled": True}
+        terminal_reviews = effective_terminal_review_task_ids(db, p["reminder_task_ids"])
 
         items = []
         for identifier in p["reminder_task_ids"]:
             current = db.get(Task, identifier)
             if (
                 current
+                and current.id not in terminal_reviews
                 and task_wecom_enabled(db, current)
                 and not current.closed_at
                 and current.status not in {"关闭", "已完成", "不统计"}
@@ -444,9 +575,16 @@ def send_wecom(db, event):
 
         issuer = db.get(User, task.issuer_id) if task and task.issuer_id else None
         if (
-            not enabled() or not task or task.source_meeting_id or task.closed_at or task.withdrawn_at
-            or not issuer or not issuer.active or not issuer.wecom_id
-            or p.get("user_ids") != [issuer.id] or not can_manage_direct_task(db, issuer, task)
+            not enabled()
+            or not task
+            or task.source_meeting_id
+            or task.closed_at
+            or task.withdrawn_at
+            or not issuer
+            or not issuer.active
+            or not issuer.wecom_id
+            or p.get("user_ids") != [issuer.id]
+            or not can_manage_direct_task(db, issuer, task, "create")
             or db.scalar(select(NativeTodoLink.id).where(NativeTodoLink.task_id == task.id))
         ):
             return {"skipped": "原生待办已确认或派发确认已不适用"}
@@ -489,30 +627,29 @@ def send_wecom(db, event):
 
         meeting = db.get(Meeting, task.source_meeting_id) if task.source_meeting_id else None
         source_title = meeting.title if meeting else "直接派发任务"
-    content = wecom_text(
-        p.get("title", "会议任务提醒"),
-        p.get("content", ""),
-        url,
-        due_date=task.due_date if task else None,
-        source_title=source_title,
-    )
+    title = {"新的直接派发任务": "你收到一项新任务", "新的会议任务": "你收到一项新任务",
+             "请验证任务完成情况": "有任务待你验证", "完成申请被驳回": "任务验证未通过"}.get(
+                 p.get("title"), p.get("title", "任务通知"))
+    body = task.content if task else p.get("content", "")
+    if task and p.get("content") and p["content"] != task.content:
+        body += "\n\n说明：" + p["content"]
+    button = "确认派发" if p.get("native_confirmation") else "去验证" if p.get("request_id") or "verification_request_ids" in p else "查看原因" if title == "任务验证未通过" else "查看会议" if p.get("meeting_edit_request_id") else "查看任务"
+    content = wecom_text(title, body, url, due_date=task.due_date if task else None,
+                         source_title=source_title if task and task.source_meeting_id else None, action=button)
+    # Preserve the pre-existing direct-assignment / native-todo confirmation cards.
     if task and task.source_meeting_id is None and task.issuer_id:
-        footer = "<br>截止日期：" + (task.due_date.isoformat() if task.due_date else "未设置")
-        issuer = db.get(User, task.issuer_id)
-        footer += "<br>派发人：" + truncate_escaped_utf8(issuer.name if issuer else "—", 120)
-        footer += (
-            "<br>打开后自动弹出企微确认窗，确认后责任人直接收到待办。"
-            if p.get("native_confirmation") else "<br>请进入系统处理任务及完成验证。"
-        )
-        prefix = escape(task.code) + "<br>"
-        raw = p.get("content", "").replace("\n", " ").replace("\r", " ")
-        budget = 512 - len((prefix + footer).encode("utf-8"))
-        description = prefix + truncate_escaped_utf8(raw, budget) + footer
-        card = {
-            "title": truncate_utf8(p.get("title", "直接派发任务提醒"), 120),
-            "description": description, "url": url,
-            "btntxt": "确认派发" if p.get("native_confirmation") else "查看任务",
-        }
+        lines = [card_text(task.content, 180),
+                 "计划完成日期：" + (task.due_date.isoformat() if task.due_date else "未设置")]
+        issuer = db.get(User, task.issuer_id) if task.issuer_id else None
+        if task.source_meeting_id:
+            lines.append("来源会议：" + card_text(source_title or "—", 120))
+        elif issuer:
+            lines.append("派发人：" + card_text(issuer.name, 60))
+        if p.get("content") and p["content"] != task.content:
+            lines.append("说明：" + card_text(p["content"], 90))
+        if p.get("native_confirmation"):
+            lines.append("确认后向责任人创建待办")
+        card = notification_card(title, lines, url, button)
         return WeCom().send([u.wecom_id for u in users], content, card=card)
     return WeCom().send([u.wecom_id for u in users], content)
 
@@ -563,40 +700,71 @@ def send_mail(db, event):
             MeetingVersion.meeting_id == meeting.id, MeetingVersion.number == p["version"]
         )
     )
+    if p.get("shared_recipients") and (
+        not version
+        or p.get("recipient_ids") != version.snapshot.get("notification_recipient_ids")
+        or p.get("cc_ids") != version.snapshot.get("notification_cc_ids")
+        or p.get("cc_emails", []) != version.snapshot.get("notification_cc_emails", [])
+    ):
+        raise NotConfigured("通知名单与已发布版本不一致，请核对发送记录")
+    if not version or p.get("cc_emails", []) != version.snapshot.get("cc_emails", []):
+        raise NotConfigured("邮件抄送地址与已发布版本不一致，请核对发送记录")
+    if p.get("cc_ids", []) != version.snapshot.get("cc_ids", []):
+        raise NotConfigured("邮件抄送人员与已发布版本不一致，请核对发送记录")
     recipients = [db.get(User, i) for i in set(p["recipient_ids"] + p["cc_ids"])]
     if any(not u or not u.active or not u.email for u in recipients):
         raise NotConfigured("收件人邮箱缺失或账号已停用")
     from app.services.access import meeting_access
 
-    for user in recipients:
-        meeting_access(db, user, meeting)
+    # The publisher explicitly approves company staff for mail-only CC. This
+    # delivers the frozen attachments without granting access to the web meeting.
+    for identifier in set(p["recipient_ids"]):
+        meeting_access(db, db.get(User, identifier), meeting)
     message = EmailMessage()
-    message["Subject"] = version.snapshot["title"] + f" · V{p['version']}"
-    message["From"] = config.smtp_from
-    message["To"] = ", ".join(db.get(User, i).email for i in p["recipient_ids"])
-    message["Cc"] = ", ".join(db.get(User, i).email for i in p["cc_ids"])
+    message["Subject"] = version.snapshot["title"]
+    message["From"] = Address(display_name="会议纪要派送员", addr_spec=parseaddr(config.smtp_from)[1])
+    to_addresses, cc_addresses, seen = [], [], set()
+    for destination, addresses in (
+        (to_addresses, [db.get(User, i).email for i in p["recipient_ids"]]),
+        (cc_addresses, [db.get(User, i).email for i in p["cc_ids"]] + p.get("cc_emails", [])),
+    ):
+        for address in addresses:
+            if address.casefold() not in seen:
+                seen.add(address.casefold())
+                destination.append(address)
+    message["To"] = ", ".join(to_addresses)
+    message["Cc"] = ", ".join(cc_addresses)
     message["Message-ID"] = f"<{event.id}@meeting-actions.local>"
     message["Date"] = formatdate(localtime=False)
     message.set_content(
         "会议纪要及任务单见附件。\n" + config.public_url.rstrip("/") + "/meetings/" + meeting.id
     )
-    for attachment in generate_exports(db, meeting.id, p["version"]):
-        if attachment.kind not in {"minutes_pdf", "tasks_xlsx"}:
-            continue
+    link = config.public_url.rstrip("/") + "/meetings/" + meeting.id
+    image_cid = f"minutes-{event.id}@meeting-actions.local"
+    message.add_alternative(
+        '<html><body><p>会议纪要及任务单见附件。</p><p><a href="'
+        + escape(link, quote=True)
+        + '">查看会议</a></p><img src="cid:'
+        + image_cid
+        + '" alt="会议纪要任务单" style="max-width:100%;height:auto"></body></html>',
+        subtype="html",
+    )
+    for attachment in generate_mail_exports(db, meeting.id, p["version"]):
         major, minor = attachment.mime_type.split("/", 1)
         message.add_attachment(
             (config.storage_dir / attachment.storage_key).read_bytes(),
             maintype=major,
             subtype=minor,
-            filename=attachment.filename,
+            filename=attachment_filename(attachment, db),
+            cid=f"<{image_cid}>" if attachment.kind == "minutes_png" else None,
         )
     with smtp_session() as smtp:
         try:
-            refused = smtp.send_message(message, to_addrs=[u.email for u in recipients])
+            refused = smtp.send_message(message, to_addrs=to_addresses + cc_addresses)
         except smtplib.SMTPRecipientsRefused as exc:
             raise ProviderRejected("所有邮件收件人被 SMTP 拒绝") from exc
         except (OSError, smtplib.SMTPException) as exc:
             raise DeliveryUncertain("邮件发送结果不明确，请按 Message-ID 核实") from exc
         if refused:
             raise DeliveryUncertain("部分邮件收件人被拒绝，请核实收件记录")
-        return {"message_id": message["Message-ID"]}
+        return {"message_id": message["Message-ID"], "to": to_addresses, "cc": cc_addresses}

@@ -38,6 +38,11 @@ test("首次保存期间的新输入保留并自动继续保存，失败时仍�
         departments: [{ id: user.department_id, name: "隔离部门" }],
         series: [],
       };
+    else if (path === "/api/meeting-people")
+      body = {
+        users: [user],
+        departments: [{ id: user.department_id, name: "隔离部门" }],
+      };
     else if (path === "/api/auth/options") body = { wecom: false };
     else if (path === "/api/meetings" && request.method() === "POST") {
       postCount += 1;
@@ -152,7 +157,6 @@ test("任务详情只接受最后点击的响应，关闭抽屉后旧响应不�
     versions: [],
     closed_at: null,
     can_edit: false,
-    can_manage_recurrence: false,
   });
   let aRequests = 0;
   const errors: string[] = [];
@@ -168,16 +172,7 @@ test("任务详情只接受最后点击的响应，关闭抽屉后旧响应不�
       body = { users: [user], departments: [], series: [] };
     else if (path === "/api/auth/options") body = { wecom: false };
     else if (path === "/api/tasks") body = [task("A"), task("B")];
-    else if (path.endsWith("/recurrence"))
-      body = {
-        id: "rule",
-        frequency: "weekly",
-        anchor_date: "2026-10-13",
-        next_due_date: "2026-10-20",
-        active: true,
-        template: null,
-        can_manage: false,
-      };
+    else if (path.endsWith("/native-todo")) body = { enabled: false };
     else if (path === "/api/tasks/A") {
       aRequests += 1;
       (aRequests === 1 ? started : startedAgain).release();
@@ -192,17 +187,26 @@ test("任务详情只接受最后点击的响应，关闭抽屉后旧响应不�
     });
   });
   await page.goto("/tasks");
-  const drawer = page.locator(".el-drawer");
+  const drawer = page.locator(".el-drawer:visible");
   const oldResponse = page.waitForResponse(
     (response) => new URL(response.url()).pathname === "/api/tasks/A",
   );
-  await page.locator(".task-card").filter({ hasText: "隔离任务甲" }).click();
+  await page
+    .locator(".task-table .task-title-button")
+    .filter({ hasText: "隔离任务甲" })
+    .click();
   await started.promise;
-  await page.locator(".task-card").filter({ hasText: "隔离任务乙" }).click();
+  await page
+    .locator(".task-table .task-title-button")
+    .filter({ hasText: "隔离任务乙" })
+    .click();
   await expect(
     drawer.getByRole("heading", { name: "隔离任务乙", exact: true }),
   ).toBeVisible();
-  await expect(drawer.getByText(/此处显示周期信息/)).toBeVisible();
+  await expect(drawer.getByText("设置周期任务", { exact: true })).toHaveCount(
+    0,
+  );
+  await expect(drawer.locator(".recurrence-panel")).toHaveCount(0);
   firstResponse.release();
   await (await oldResponse).finished();
   await page.evaluate(async () => {

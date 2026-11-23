@@ -34,17 +34,20 @@ test("统一蓝色主题覆盖主要页面并适配移动端", async ({ page }) 
   await page.getByRole("link", { name: "系统管理", exact: true }).click();
   const notificationSwitch = page
     .locator(".el-form-item")
-    .filter({ hasText: "成员提醒总开关" })
+    .filter({ hasText: "会议提醒及纪要邮件开关" })
     .locator(".el-switch");
   await expect(notificationSwitch).toBeVisible();
   await notificationSwitch.click();
   await page.getByRole("button", { name: "保存提醒规则" }).click();
-  await expect(page.getByText(/测试保护已开启/)).toBeVisible();
+  await expect(page.getByText(/会议提醒及纪要邮件已关闭/)).toBeVisible();
   await notificationSwitch.click();
   await page.getByRole("button", { name: "保存提醒规则" }).click();
-  await expect(page.getByText(/成员提醒已开启：新产生/)).toBeVisible();
+  await expect(page.getByText(/会议发布通知已开启/)).toBeVisible();
 
   await page.getByRole("link", { name: "会议纪要与任务单" }).click();
+  await page
+    .getByRole("button", { name: "浏览器验收例会", exact: true })
+    .click();
   await page.getByRole("button", { name: "＋ 新建会议", exact: true }).click();
   await expect(
     page.getByRole("heading", { name: "会议基本信息", exact: true }),

@@ -6,15 +6,61 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 
 from app.core.config import get_settings
-from app.models import NativeTodoAttempt, NativeTodoLink, OutboxEvent, User, now
+from app.models import Meeting, MeetingVersion, NativeTodoAttempt, NativeTodoLink, OutboxEvent, User, now
 from app.services.access import can_manage_direct_task
 from app.services.business import enqueue, owner_ids
 from app.services.integrations import ProviderRejected, WeCom, truncate_utf8
+from app.services.role_permissions import meeting_allowed
 
 
-def enabled():
+def enabled(source=None):
     settings = get_settings()
-    return settings.native_todo_app_enabled and settings.native_todo_source_enabled("direct")
+    return settings.native_todo_app_enabled and (
+        settings.native_todo_source_enabled(source)
+        if source
+        else any(settings.native_todo_source_enabled(value) for value in ("direct", "meeting"))
+    )
+
+
+def task_source(task):
+    return "meeting" if task.source_meeting_id else "direct"
+
+
+def meeting_assignment_ids(db, meeting):
+    """Only the latest published new arrangements may start native todo creation."""
+    if meeting.historical or not meeting.published_version:
+        return []
+    version = db.scalar(
+        select(MeetingVersion).where(
+            MeetingVersion.meeting_id == meeting.id,
+            MeetingVersion.number == meeting.published_version,
+        )
+    )
+    return list(
+        dict.fromkeys(
+            item["task_id"]
+            for item in (version.snapshot.get("items", []) if version else [])
+            if item.get("section") == "new" and item.get("task_id")
+        )
+    )
+
+
+def can_manage_app_task(db, actor, task):
+    if not actor.active:
+        return False
+    if task.source_meeting_id:
+        meeting = db.get(Meeting, task.source_meeting_id)
+        return bool(meeting and meeting_allowed(db, actor, meeting, "publish"))
+    return can_manage_direct_task(db, actor, task, "create")
+
+
+def can_confirm_app_task(db, actor, task):
+    if not can_manage_app_task(db, actor, task):
+        return False
+    if not task.source_meeting_id:
+        return task.issuer_id == actor.id
+    meeting = db.get(Meeting, task.source_meeting_id)
+    return task.id in meeting_assignment_ids(db, meeting)
 
 
 def task_content(task, *, legacy=False):
@@ -63,12 +109,14 @@ def task_payload(db, task):
 
 def enqueue_issuer_confirmation(db, task, actor=None):
     """Invite only the bound issuer; a client-confirmed todo suppresses this reminder."""
-    if not enabled() or task.source_meeting_id or task.closed_at or task.withdrawn_at:
+    if not enabled("direct") or task.source_meeting_id or task.closed_at or task.withdrawn_at:
         return
     actor = actor or (db.get(User, task.issuer_id) if task.issuer_id else None)
     if (
-        not actor or not actor.wecom_id or task.issuer_id != actor.id
-        or not can_manage_direct_task(db, actor, task)
+        not actor
+        or not actor.wecom_id
+        or task.issuer_id != actor.id
+        or not can_manage_direct_task(db, actor, task, "create")
         or db.scalar(select(NativeTodoLink.id).where(NativeTodoLink.task_id == task.id))
     ):
         return
@@ -101,10 +149,18 @@ def enqueue_issuer_confirmation(db, task, actor=None):
 def native_state(db, actor, task):
     link = db.scalar(select(NativeTodoLink).where(NativeTodoLink.task_id == task.id))
     attempt = db.scalar(select(NativeTodoAttempt).where(NativeTodoAttempt.task_id == task.id))
-    manager = task.issuer_id == actor.id and can_manage_direct_task(db, actor, task)
+    manager = can_confirm_app_task(db, actor, task)
     current = None
     reason = ""
-    if enabled() and manager and not task.closed_at and not task.withdrawn_at and not link:
+    if not enabled(task_source(task)):
+        reason = "该任务来源的自建应用原生待办尚未启用"
+    elif not manager:
+        reason = (
+            "只有任务所属会议的发布者可确认最新本次安排中的原生待办"
+            if task.source_meeting_id
+            else "原生待办须由派发人确认，责任人无需创建"
+        )
+    if enabled(task_source(task)) and manager and not task.closed_at and not task.withdrawn_at and not link:
         if not actor.wecom_id:
             reason = "请使用绑定企业微信的派发人账号创建原生待办"
         else:
@@ -135,9 +191,13 @@ def native_state(db, actor, task):
         elif original.get("content_version", 1) < 2 and (task.requirements or task.deliverable):
             warning = "此待办创建时尚未携带补充说明和输出物，请在系统任务详情查看完整安排。"
     return {
-        "enabled": enabled(),
+        "enabled": enabled(task_source(task)),
         "can_create": current is not None,
-        "is_issuer": task.issuer_id == actor.id,
+        # Editors may recover a pending callback even if a later revision removed the row.
+        "is_issuer": can_manage_app_task(db, actor, task)
+        if task.source_meeting_id
+        else task.issuer_id == actor.id,
+        "source": task_source(task),
         "reason": reason,
         "link": {"provider": link.provider, "todo_id": link.todo_id, "state": link.state} if link else None,
         "pending_attempt": {

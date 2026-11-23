@@ -44,18 +44,16 @@ def review_meeting(db, team, draft_factory, task, status="未完成"):
         lambda d: setattr(d, "kind", "special"),
     ],
 )
-def test_recorder_cannot_change_historical_assessment_indirectly(db, team, draft_factory, mutation):
+def test_recorder_can_confirm_revision_without_another_approval(db, team, draft_factory, mutation):
     _, task = issued_task(db, team, draft_factory)
     meeting = review_meeting(db, team, draft_factory, task)
     revision(db, team["colleague"], meeting.id, "申请修订")
     draft = MeetingDraft.model_validate(meeting.draft)
     mutation(draft)
     save_meeting(db, team["colleague"], meeting.id, draft, 2)
-    with pytest.raises(HTTPException) as error:
-        publish(db, team["colleague"], meeting.id, PublishRequest(expected_version=3, reason="修订"))
-    assert error.value.status_code == 403
-    assert meeting.published_version == 1
-    assert len(list(db.scalars(select(Assessment).where(Assessment.meeting_id == meeting.id)))) == 2
+    publish(db, team["colleague"], meeting.id, PublishRequest(expected_version=3, reason="修订"))
+    assert meeting.published_version == 2
+    assert len(list(db.scalars(select(Assessment).where(Assessment.meeting_id == meeting.id)))) == 2+2*len(draft.items)
 
 
 def test_recorder_can_correct_decisions_but_not_promote_self_to_host(db, team, draft_factory):

@@ -21,7 +21,7 @@ from redis import Redis
 from sqlalchemy import func, select
 
 from app.core.config import get_settings
-from app.models import AuditLog, OutboxEvent, RecurringRule, SystemSetting, now
+from app.models import AuditLog, OutboxEvent, SystemSetting, now
 
 # Alert webhooks may include credentials in their URL. Do not allow httpx's
 # request logger to print URLs; alert failures are reported with redacted types.
@@ -81,12 +81,6 @@ def collect(factory, config=None, current=None, ping=redis_ping):
             beat = db.get(SystemSetting, "worker.dispatch")
             last = utc(beat.value["at"]) if beat else None
             check("database", "数据库", True, "连接正常")
-            failed_rules = db.scalar(
-                select(func.count()).select_from(RecurringRule).where(RecurringRule.last_error.is_not(None))
-            )
-            check(
-                "recurrence_rules", "周期规则执行", not failed_rules, f"{failed_rules} 条周期规则需要人工处理"
-            )
             check(
                 "scheduler_worker",
                 "调度执行心跳",
@@ -102,6 +96,14 @@ def collect(factory, config=None, current=None, ping=redis_ping):
                 ("uncertain", "送达结果不明"),
             ]:
                 count = queues.get(state, 0)
+                if state == "failed":
+                    # Recognition failures are actionable in the import UI, not
+                    # delivery outages. Keep their history and retry available.
+                    count = db.scalar(
+                        select(func.count()).select_from(OutboxEvent).where(
+                            OutboxEvent.state == "failed", OutboxEvent.channel != "import"
+                        )
+                    )
                 check("delivery_" + state, label, count == 0, f"{count} 条待处理")
             overdue = db.scalar(
                 select(func.count())

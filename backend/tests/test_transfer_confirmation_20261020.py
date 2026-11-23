@@ -1,3 +1,5 @@
+from tests.role_helpers import grant as new_grant, dispatch_grant, report_grant
+from app.services.role_migration import rule
 from datetime import date
 
 import pytest
@@ -24,6 +26,7 @@ def test_handover_confirms_current_version_with_new_issuer_only(db, team, monkey
     issuer.wecom_id = "previous-issuer"
     successor.wecom_id = "current-issuer"
     successor.position = "部长"
+    dispatch_grant(db,successor)
     team["a"].wecom_id = "owner"
     task = Task(
         code="RW-TRANSFER-CONFIRM",

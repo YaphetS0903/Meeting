@@ -1,33 +1,42 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { api, clientId, departmentPath, run, state } from "../api";
-import StatusTag from "../components/StatusTag.vue";
+import { api, clientId, run, state } from "../api";
+import { isEmployeeAccount } from "../people";
+import PeopleSelect from "../components/PeopleSelect.vue";
+import IssuedTaskRecords from "../components/IssuedTaskRecords.vue";
 import NativeTodoPanel from "../components/NativeTodoPanel.vue";
 import {
   Calendar,
   Checked,
   Document,
   Promotion,
-  Refresh,
   User,
   Bell,
   ArrowRight,
 } from "@element-plus/icons-vue";
 import { confirmAssignedTodo, type NativeResult } from "../nativeAssignment";
 import { insideWeCom } from "../wecom";
+import { assignmentDeliveryMessage } from "../assignmentDelivery";
 
-type Person = { id: string; name: string; department_id: string | null };
+type Person = {
+  id: string;
+  name: string;
+  department_id: string | null;
+  active?: boolean;
+  wecom_bound?: boolean;
+  position?: string;
+};
 const options = ref<{
   can_assign: boolean;
   scope: string;
   native_todo_auto_confirm: boolean;
   wecom_bound: boolean;
+  wecom_notifications_enabled: boolean;
   users: Person[];
 } | null>(null);
 const rows = ref<any[]>([]);
 const busy = ref(false);
-const loading = ref(false);
 const loadError = ref("");
 const formError = ref("");
 const form = ref({
@@ -45,7 +54,8 @@ const restoredAttempt = ref(false);
 const savedTask = ref<any>(null);
 const nativeResult = ref<NativeResult | null>(null);
 const phase = ref("");
-const search = ref("");
+const recordsVisible = ref(false);
+const previewExpanded = ref(false);
 const ownerNames = computed(() =>
   form.value.owner_ids.map((id) => people.value.get(id) || "未找到人员"),
 );
@@ -63,24 +73,17 @@ const nativeReady = computed(
     options.value?.wecom_bound &&
     insideWeCom(),
 );
-const deliveryHint = computed(() =>
-  nativeReady.value
-    ? "派发后自动弹出企微确认窗，确认后责任人直接收到原生待办。"
-    : insideWeCom() && !options.value?.wecom_bound
-      ? "当前账号未绑定企微。使用企业微信身份登录后派发，可自动弹窗确认原生待办。"
-      : options.value?.wecom_bound && options.value?.native_todo_auto_confirm
-        ? "当前浏览器派发后，责任人自动收到应用消息；你会收到企微确认卡片，打开确认后为责任人生成原生待办。"
-        : "从企业微信工作台用本人账号派发，可自动弹窗确认原生待办。当前浏览器派发将自动发送应用消息。",
-);
-const filteredRows = computed(() =>
-  rows.value.filter(
-    (row) =>
-      !search.value.trim() ||
-      `${row.content} ${row.code} ${row.owner_names.join(" ")}`
-        .toLowerCase()
-        .includes(search.value.trim().toLowerCase()),
-  ),
-);
+const deliveryHint = computed(() => {
+  if (!options.value) return "正在读取通知设置…";
+  const notification = options.value.wecom_notifications_enabled
+    ? "任务建立后将排队发送应用消息，实际送达请查看通知记录。"
+    : "应用消息通知已关闭，责任人可登录系统查看任务。";
+  if (nativeReady.value)
+    return notification + "派发后会弹出企微确认窗，可确认创建原生待办。";
+  if (options.value.native_todo_auto_confirm)
+    return notification + "使用已绑定的本人企微身份，可确认创建原生待办。";
+  return notification;
+});
 const openCount = computed(
   () => rows.value.filter((row) => !row.closed_at && !row.withdrawn_at).length,
 );
@@ -107,17 +110,45 @@ try {
 } catch {
   sessionStorage.removeItem(draftStorageKey);
 }
-const allowed = computed(() => options.value?.users || []);
+const allowed = computed(() => {
+  const directory = new Map<string, any>(
+    state.directory.users.map((person: any) => [person.id, person]),
+  );
+  return (options.value?.users || [])
+    .map((person) => ({
+      ...directory.get(person.id),
+      ...person,
+      // This endpoint returns only active employees within dispatch scope.
+      active: person.active !== false,
+    }))
+    .filter((person) => person.active && isEmployeeAccount(person));
+});
+const verifiers = computed(() => {
+  if (!state.me || allowed.value.some((person) => person.id === state.me.id))
+    return allowed.value;
+  // The dispatcher may verify personally, as on the previous form.
+  return [...allowed.value, { ...state.me, active: true }];
+});
+const verifierWarning = computed(() => {
+  const selected = verifiers.value.find(
+    (p: any) => p.id === form.value.verifier_id,
+  );
+  const bound =
+    selected?.wecom_bound ??
+    (selected?.id === state.me?.id ? options.value?.wecom_bound : undefined);
+  return bound === false
+    ? "该验证人未绑定企业微信，无法收到验证提醒；可在系统验证待办中处理，或改选已绑定人员。"
+    : "";
+});
 const people = computed(
   () => new Map(allowed.value.map((person) => [person.id, person.name])),
 );
-async function load() {
-  loading.value = true;
+async function load(background = false) {
   loadError.value = "";
   try {
     const [scope, issued] = await Promise.all([
       api("/direct-assignments/options"),
-      api("/direct-assignments"),
+      api("/direct-assignments", "GET", undefined, { background }),
     ]);
     options.value = scope;
     rows.value = issued;
@@ -125,22 +156,33 @@ async function load() {
     loadError.value = error.message || "服务暂时不可用";
     rows.value = [];
     throw error;
-  } finally {
-    loading.value = false;
   }
+}
+function openRecords() {
+  recordsVisible.value = true;
 }
 async function assign() {
   formError.value = "";
   fieldErrors.value = {
     content: form.value.content.trim() ? "" : "请填写任务内容",
-    owner_ids: form.value.owner_ids.length ? "" : "请选择责任人",
-    verifier_id: form.value.verifier_id ? "" : "请选择验证人",
+    owner_ids: !form.value.owner_ids.length
+      ? "请选择责任人"
+      : form.value.owner_ids.some(
+            (id) => !allowed.value.some((person) => person.id === id),
+          )
+        ? "责任人不在当前可选员工范围，请重新选择"
+        : "",
+    verifier_id: !form.value.verifier_id
+      ? "请选择验证人"
+      : !verifiers.value.some((person) => person.id === form.value.verifier_id)
+        ? "验证人不在当前可选员工范围，请重新选择"
+        : "",
     due_date: form.value.due_date ? "" : "请选择计划完成时间",
   };
   if (
     !form.value.content.trim() ||
-    !form.value.owner_ids.length ||
-    !form.value.verifier_id ||
+    fieldErrors.value.owner_ids ||
+    fieldErrors.value.verifier_id ||
     !form.value.due_date
   ) {
     formError.value = "请填写任务内容、计划完成时间，并选择责任人和验证人";
@@ -162,7 +204,7 @@ async function assign() {
   };
   try {
     await ElMessageBox.confirm(
-      `确定向 ${names} 派发任务吗？截止日期：${form.value.due_date}。`,
+      `确定向 ${names} 派发任务吗？截止日期：${form.value.due_date}。${verifierWarning.value}`,
       "确认派发任务",
       {
         confirmButtonText: "确认派发",
@@ -188,7 +230,9 @@ async function assign() {
     attemptPayload = "";
     savedTask.value = task;
     nativeResult.value = null;
-    ElMessage.success("任务已派发，应用消息排队发送中");
+    ElMessage.success(
+      "任务已派发。" + assignmentDeliveryMessage(task.wecom_notification_state),
+    );
     form.value = {
       content: "",
       requirements: "",
@@ -205,7 +249,7 @@ async function assign() {
           : {
               state: "unavailable",
               message:
-                "当前账号未绑定企业微信，已使用责任人应用消息提醒。使用本人企微账号派发时，可确认原生待办。",
+                "当前账号未绑定企业微信。使用本人企微账号派发时，可确认原生待办。",
             };
       } catch (error: any) {
         nativeResult.value = {
@@ -216,7 +260,7 @@ async function assign() {
       if (nativeResult.value.state === "created")
         ElMessage.success("原生待办已送达责任人");
     }
-    await run(load);
+    await run(() => load(true));
   } catch (error: any) {
     if (error !== "cancel" && error !== "close")
       formError.value = error.message || "派发失败，请检查后重试";
@@ -232,19 +276,34 @@ onMounted(() => run(load));
   <div class="dispatch-page">
     <section class="dispatch-heading">
       <div>
-        <p class="dispatch-kicker">任务协作 / 直接派发</p>
         <h1>直接派发任务</h1>
-        <p>明确工作、指定责任人，让每一项安排都有跟进。</p>
       </div>
-      <RouterLink
-        v-if="options?.can_assign"
-        :to="{
-          path: '/task-overview',
-          query: { source: 'direct', issued_by_me: '1' },
-        }"
-      >
-        <el-button :icon="Document">任务总览</el-button>
-      </RouterLink>
+      <div class="dispatch-heading-actions" v-if="options?.can_assign">
+        <el-button
+          class="dispatch-preview-toggle"
+          :aria-expanded="previewExpanded"
+          aria-controls="dispatch-preview-panel"
+          @click="previewExpanded = !previewExpanded"
+          >{{ previewExpanded ? "收起预览" : "派发预览" }}</el-button
+        >
+        <el-button
+          class="dispatch-records-mobile"
+          :icon="Document"
+          aria-label="我派发的任务"
+          aria-haspopup="dialog"
+          :aria-expanded="recordsVisible"
+          @click="openRecords"
+          >我派发的任务</el-button
+        >
+        <RouterLink
+          :to="{
+            path: '/task-overview',
+            query: { source: 'direct', issued_by_me: '1' },
+          }"
+        >
+          <el-button :icon="Document">任务总览</el-button>
+        </RouterLink>
+      </div>
     </section>
     <el-alert
       v-if="loadError"
@@ -255,7 +314,7 @@ onMounted(() => run(load));
     />
     <el-alert
       v-if="options && !options.can_assign"
-      title="当前岗位没有派发权限，如岗位信息有误，请联系管理员同步企业微信通讯录。"
+      title="当前账号没有派发权限，请联系系统管理员核对岗位或授权角色。"
       type="info"
       :closable="false"
       show-icon
@@ -277,7 +336,6 @@ onMounted(() => run(load));
               ></span>
               <div>
                 <h2>新建任务</h2>
-                <p>填写安排，确认后通知责任人</p>
               </div>
             </div>
             <span class="dispatch-scope"
@@ -298,7 +356,7 @@ onMounted(() => run(load));
               <el-input
                 v-model="form.content"
                 type="textarea"
-                :rows="4"
+                :rows="3"
                 maxlength="20000"
                 show-word-limit
                 placeholder="例如：整理本月采购计划，并提交部门审核"
@@ -311,57 +369,32 @@ onMounted(() => run(load));
                 required
                 :error="fieldErrors.owner_ids"
               >
-                <el-select
+                <PeopleSelect
                   v-model="form.owner_ids"
                   multiple
-                  filterable
-                  collapse-tags
-                  collapse-tags-tooltip
-                  :max-collapse-tags="2"
-                  placeholder="搜索姓名，可选择多人"
+                  search-only
+                  copyable
+                  :users="allowed"
+                  placeholder="输入或粘贴姓名，多个用顿号分隔"
                   aria-label="选择责任人"
-                >
-                  <el-option
-                    v-for="person in allowed"
-                    :key="person.id"
-                    :value="person.id"
-                    :label="
-                      person.name +
-                      (person.department_id
-                        ? ' · ' + departmentPath(person.department_id)
-                        : '')
-                    "
-                  />
-                </el-select>
+                />
               </el-form-item>
               <el-form-item
                 label="验证人"
                 required
                 :error="fieldErrors.verifier_id"
               >
-                <el-select
+                <PeopleSelect
                   v-model="form.verifier_id"
-                  filterable
-                  placeholder="选择完成后的验证人"
+                  search-only
+                  copyable
+                  :users="verifiers"
+                  placeholder="输入或粘贴验证人姓名"
                   aria-label="选择验证人"
-                >
-                  <el-option
-                    v-if="state.me && !people.has(state.me.id)"
-                    :value="state.me.id"
-                    :label="state.me.name + ' · 派发人'"
-                  />
-                  <el-option
-                    v-for="person in allowed"
-                    :key="person.id"
-                    :value="person.id"
-                    :label="
-                      person.name +
-                      (person.department_id
-                        ? ' · ' + departmentPath(person.department_id)
-                        : '')
-                    "
-                  />
-                </el-select>
+                />
+                <p v-if="verifierWarning" class="muted small" role="status">
+                  {{ verifierWarning }}
+                </p>
               </el-form-item>
               <el-form-item
                 label="计划完成时间"
@@ -412,9 +445,6 @@ onMounted(() => run(load));
               show-icon
             />
             <footer class="dispatch-submit">
-              <p>
-                <el-icon><Checked /></el-icon>完成后由验证人确认关闭
-              </p>
               <el-button
                 type="primary"
                 native-type="submit"
@@ -426,66 +456,83 @@ onMounted(() => run(load));
             </footer>
           </el-form>
         </section>
-        <aside class="dispatch-preview panel" aria-label="派发预览">
-          <div class="dispatch-preview-heading">
-            <h2>派发预览</h2>
-            <span>实时预览</span>
-          </div>
-          <div class="dispatch-preview-body">
-            <span class="dispatch-preview-label">任务安排</span>
-            <p
-              class="dispatch-preview-content"
-              :class="{ 'is-empty': !form.content.trim() }"
-            >
-              {{
-                form.content.trim() ||
-                "填写任务内容后，这里会显示本次派发的安排。"
-              }}
-            </p>
-            <div class="dispatch-preview-item">
-              <el-icon><User /></el-icon>
-              <div>
-                <span>责任人</span>
-                <div v-if="ownerNames.length" class="dispatch-recipient-list">
-                  <span
-                    v-for="(name, index) in ownerNames.slice(0, 3)"
-                    :key="index"
-                    class="dispatch-recipient"
-                    >{{ name }}</span
-                  ><span v-if="ownerNames.length > 3" class="dispatch-more"
-                    >+{{ ownerNames.length - 3 }} 人</span
-                  >
+        <div
+          id="dispatch-preview-panel"
+          class="dispatch-sidebar"
+          :class="{ 'is-open': previewExpanded }"
+        >
+          <aside class="dispatch-preview panel" aria-label="派发预览">
+            <div class="dispatch-preview-heading">
+              <h2>派发预览</h2>
+            </div>
+            <div class="dispatch-preview-body">
+              <span class="dispatch-preview-label">任务安排</span>
+              <p
+                class="dispatch-preview-content"
+                :class="{ 'is-empty': !form.content.trim() }"
+              >
+                {{ form.content.trim() || "待填写任务内容" }}
+              </p>
+              <div class="dispatch-preview-item">
+                <el-icon><User /></el-icon>
+                <div>
+                  <span>责任人</span>
+                  <div v-if="ownerNames.length" class="dispatch-recipient-list">
+                    <span
+                      v-for="(name, index) in ownerNames.slice(0, 3)"
+                      :key="index"
+                      class="dispatch-recipient"
+                      >{{ name }}</span
+                    ><span v-if="ownerNames.length > 3" class="dispatch-more"
+                      >+{{ ownerNames.length - 3 }} 人</span
+                    >
+                  </div>
+                  <p v-else>待选择</p>
                 </div>
-                <p v-else>待选择</p>
+              </div>
+              <div class="dispatch-preview-item">
+                <el-icon><Calendar /></el-icon>
+                <div>
+                  <span>计划完成</span>
+                  <p>{{ form.due_date || "待选择计划完成时间" }}</p>
+                </div>
+              </div>
+              <div class="dispatch-preview-item">
+                <el-icon><Checked /></el-icon>
+                <div>
+                  <span>验证人</span>
+                  <p>{{ verifierName }}</p>
+                </div>
+              </div>
+              <div v-if="form.deliverable.trim()" class="dispatch-preview-item">
+                <el-icon><Document /></el-icon>
+                <div>
+                  <span>输出物</span>
+                  <p>{{ form.deliverable }}</p>
+                </div>
               </div>
             </div>
-            <div class="dispatch-preview-item">
-              <el-icon><Calendar /></el-icon>
-              <div>
-                <span>计划完成</span>
-                <p>{{ form.due_date || "待选择计划完成时间" }}</p>
-              </div>
-            </div>
-            <div class="dispatch-preview-item">
-              <el-icon><Checked /></el-icon>
-              <div>
-                <span>验证人</span>
-                <p>{{ verifierName }}</p>
-              </div>
-            </div>
-            <div v-if="form.deliverable.trim()" class="dispatch-preview-item">
-              <el-icon><Document /></el-icon>
-              <div>
-                <span>输出物</span>
-                <p>{{ form.deliverable }}</p>
-              </div>
-            </div>
-          </div>
-          <div class="dispatch-preview-footer">
-            <span>派发</span><el-icon><ArrowRight /></el-icon><span>执行</span
-            ><el-icon><ArrowRight /></el-icon><span>验证关闭</span>
-          </div>
-        </aside>
+          </aside>
+          <button
+            type="button"
+            class="panel dispatch-records-trigger"
+            aria-label="我派发的任务"
+            aria-haspopup="dialog"
+            :aria-expanded="recordsVisible"
+            @click="openRecords"
+          >
+            <span class="dispatch-records-trigger-title">
+              <strong>我派发的任务</strong>
+              <span class="count">{{ rows.length }}</span>
+            </span>
+            <span class="dispatch-records-trigger-summary"
+              >{{ openCount }} 项正在跟进</span
+            >
+            <span class="dispatch-records-trigger-action"
+              >查看全部派发记录<el-icon><ArrowRight /></el-icon
+            ></span>
+          </button>
+        </div>
       </div>
       <section v-if="savedTask" class="dispatch-result" aria-live="polite">
         <div class="dispatch-result-heading">
@@ -494,10 +541,10 @@ onMounted(() => run(load));
             <strong>任务已派发</strong>
             <p>
               {{
-                nativeResult?.message ||
-                "应用消息排队发送中，责任人可在系统查看任务。"
+                assignmentDeliveryMessage(savedTask.wecom_notification_state)
               }}
             </p>
+            <p v-if="nativeResult?.message">{{ nativeResult.message }}</p>
           </div>
           <RouterLink :to="{ path: '/tasks', query: { id: savedTask.id } }"
             ><el-button>查看任务</el-button></RouterLink
@@ -509,89 +556,21 @@ onMounted(() => run(load));
           :result="nativeResult"
         />
       </section>
-      <section class="panel dispatch-records">
-        <header class="dispatch-records-heading">
-          <div>
-            <h2>
-              我派发的任务 <span class="count">{{ rows.length }}</span>
-            </h2>
-            <p>{{ openCount }} 项正在跟进</p>
-          </div>
-          <div class="dispatch-records-actions">
-            <el-input
-              v-model="search"
-              placeholder="搜索任务、编号或责任人"
-              clearable
-              aria-label="搜索派发记录"
-            /><el-button :icon="Refresh" :loading="loading" @click="run(load)"
-              >刷新</el-button
-            >
-          </div>
-        </header>
-        <el-table
-          v-loading="loading"
-          :data="filteredRows"
-          :empty-text="
-            loadError
-              ? '加载失败，请重试'
-              : search
-                ? '没有匹配的任务'
-                : '还没有派发记录，从上方创建第一项任务'
-          "
-        >
-          <el-table-column label="任务内容" min-width="300"
-            ><template #default="{ row }"
-              ><RouterLink
-                class="table-link dispatch-task-link"
-                :to="{ path: '/tasks', query: { id: row.id } }"
-                >{{ row.content }}</RouterLink
-              >
-              <div class="dispatch-task-code">{{ row.code }}</div></template
-            ></el-table-column
-          >
-          <el-table-column label="责任人" min-width="160"
-            ><template #default="{ row }">{{
-              row.owner_names.join("、")
-            }}</template></el-table-column
-          >
-          <el-table-column label="计划完成" width="145"
-            ><template #default="{ row }"
-              ><span :class="{ muted: !row.due_date }">{{
-                row.due_date || "未设期限"
-              }}</span></template
-            ></el-table-column
-          >
-          <el-table-column label="状态" width="110"
-            ><template #default="{ row }"
-              ><el-tag v-if="row.withdrawn_at" type="info">已撤回</el-tag
-              ><StatusTag v-else :value="row.status" /></template
-          ></el-table-column>
-          <el-table-column label="操作" width="175"
-            ><template #default="{ row }"
-              ><div class="dispatch-row-actions">
-                <RouterLink
-                  class="dispatch-detail-link"
-                  :to="{ path: '/tasks', query: { id: row.id } }"
-                  >查看详情</RouterLink
-                ><RouterLink
-                  v-if="
-                    options?.wecom_bound &&
-                    options?.native_todo_auto_confirm &&
-                    !row.closed_at &&
-                    !row.withdrawn_at
-                  "
-                  class="dispatch-detail-link"
-                  :to="{
-                    path: '/tasks',
-                    query: { id: row.id, native_confirm: '1' },
-                  }"
-                  >企微待办</RouterLink
-                >
-              </div></template
-            ></el-table-column
-          >
-        </el-table>
-      </section>
+      <el-dialog
+        v-model="recordsVisible"
+        title="我派发的任务"
+        width="min(1180px, 94vw)"
+        top="5vh"
+        append-to-body
+        destroy-on-close
+      >
+        <IssuedTaskRecords
+          v-if="recordsVisible"
+          dialog
+          @loaded="rows = $event"
+          @close="recordsVisible = false"
+        />
+      </el-dialog>
     </template>
   </div>
 </template>
@@ -603,6 +582,8 @@ onMounted(() => run(load));
   --dispatch-line: #e8eef7;
   --dispatch-tint: #f5f8fd;
   --dispatch-blue: #2878ef;
+}
+.dispatch-page {
   max-width: 1480px;
   margin: 0 auto;
 }
@@ -613,20 +594,25 @@ onMounted(() => run(load));
   gap: 24px;
   margin-bottom: 24px;
 }
-.dispatch-kicker {
-  color: var(--dispatch-muted);
-  font-size: 12px;
-  margin: 0 0 8px;
-}
 .dispatch-heading h1 {
   font-size: 26px;
   letter-spacing: 0;
-  margin: 0 0 8px;
-}
-.dispatch-heading > div > p:last-child {
-  color: var(--dispatch-muted);
-  font-size: 14px;
   margin: 0;
+}
+.dispatch-heading-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.dispatch-heading-actions .el-button {
+  margin: 0;
+}
+.dispatch-records-mobile {
+  display: none;
+}
+.dispatch-preview-toggle {
+  display: none;
 }
 .dispatch-page > .el-alert {
   margin-bottom: 18px;
@@ -638,8 +624,7 @@ onMounted(() => run(load));
   align-items: start;
 }
 .dispatch-form-card,
-.dispatch-preview,
-.dispatch-records {
+.dispatch-preview {
   border-radius: 14px;
   overflow: hidden;
   margin-bottom: 0;
@@ -669,18 +654,11 @@ onMounted(() => run(load));
   flex-shrink: 0;
 }
 .dispatch-title h2,
-.dispatch-preview-heading h2,
-.dispatch-records-heading h2 {
+.dispatch-preview-heading h2 {
   margin: 0;
   font-size: 18px;
   font-weight: 650;
   color: var(--dispatch-text);
-}
-.dispatch-title p,
-.dispatch-records-heading p {
-  margin: 4px 0 0;
-  font-size: 12px;
-  color: var(--dispatch-muted);
 }
 .dispatch-scope {
   display: inline-flex;
@@ -758,33 +736,57 @@ onMounted(() => run(load));
   display: flex;
   flex-direction: row;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: 16px;
   width: auto;
   padding: 20px 0 24px;
   border-top: 1px solid var(--dispatch-line);
   margin-top: 22px;
 }
-.dispatch-submit p {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--dispatch-muted);
-  margin: 0;
-  min-width: 0;
-}
-.dispatch-submit p .el-icon {
-  color: #42826d;
-}
 .dispatch-submit .el-button {
   min-width: 162px;
   min-height: 44px;
   margin: 0;
 }
-.dispatch-preview {
+.dispatch-sidebar {
   position: sticky;
   top: 24px;
+  display: grid;
+  gap: 20px;
+  min-width: 0;
+}
+.dispatch-records-trigger {
+  width: 100%;
+  padding: 22px;
+  text-align: left;
+  color: var(--dispatch-text);
+  display: grid;
+  gap: 8px;
+}
+.dispatch-records-trigger:hover {
+  border-color: var(--dispatch-blue);
+}
+.dispatch-records-trigger:focus-visible {
+  outline: 2px solid var(--dispatch-blue);
+  outline-offset: 3px;
+}
+.dispatch-records-trigger-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 16px;
+}
+.dispatch-records-trigger-summary {
+  font-size: 13px;
+  color: var(--dispatch-muted);
+}
+.dispatch-records-trigger-action {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--dispatch-blue);
+  font-size: 13px;
+  margin-top: 8px;
 }
 .dispatch-preview-heading {
   display: flex;
@@ -863,20 +865,6 @@ onMounted(() => run(load));
   font-size: 12px;
   align-self: center;
 }
-.dispatch-preview-footer {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
-  padding: 16px;
-  background: var(--dispatch-tint);
-  border-top: 1px solid var(--dispatch-line);
-  color: #617a9c;
-  font-size: 12px;
-}
-.dispatch-preview-footer .el-icon {
-  color: #a2b4cc;
-}
 .dispatch-result {
   margin-top: 24px;
   border: 1px solid #d9e9e1;
@@ -913,70 +901,87 @@ onMounted(() => run(load));
   padding: 16px 0 0;
   margin-bottom: 0;
 }
-.dispatch-records {
-  margin-top: 24px;
-}
-.dispatch-records-heading {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 20px;
-  padding: 22px 28px;
-}
-.dispatch-records-heading h2 {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.dispatch-records-actions {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-.dispatch-records-actions .el-input {
-  width: 255px;
-}
-.dispatch-records-actions .el-button {
-  margin: 0;
-}
-.dispatch-records :deep(.el-table__cell) {
-  padding-left: 18px;
-  padding-right: 8px;
-}
-.dispatch-task-link {
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  overflow: hidden;
-  line-height: 1.65;
-  font-weight: 500;
-}
-.dispatch-task-code {
-  color: #8b99ac;
-  font-size: 11px;
-  margin-top: 5px;
-  font-variant-numeric: tabular-nums;
-}
-.dispatch-detail-link {
-  color: var(--dispatch-blue);
-  font-size: 13px;
-}
-.dispatch-row-actions {
-  display: flex;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-@media (max-width: 1150px) {
+@media (max-width: 1440px) {
   .dispatch-layout {
     grid-template-columns: minmax(0, 1fr);
   }
-  .dispatch-preview {
+  .dispatch-sidebar {
     display: none;
+  }
+  .dispatch-sidebar.is-open {
+    display: block;
+    grid-row: 1;
+    position: static;
+  }
+  .dispatch-sidebar .dispatch-records-trigger {
+    display: none;
+  }
+  .dispatch-preview-toggle {
+    display: inline-flex;
+  }
+  .dispatch-records-mobile {
+    display: inline-flex;
+  }
+}
+@media (min-width: 768px) and (max-width: 1440px) {
+  .dispatch-heading {
+    margin-bottom: 12px;
+  }
+  .dispatch-heading h1 {
+    font-size: 22px;
+  }
+  .dispatch-form-card {
+    overflow: visible;
+  }
+  .dispatch-card-heading {
+    padding: 14px 20px;
+  }
+  .dispatch-form {
+    padding: 16px 20px 0;
+  }
+  .dispatch-form :deep(.el-form-item) {
+    margin-bottom: 14px;
+  }
+  .dispatch-form :deep(.el-form-item__label) {
+    margin-bottom: 5px;
+  }
+  .dispatch-form :deep(.el-input__wrapper),
+  .dispatch-form :deep(.el-select__wrapper) {
+    min-height: 36px;
+  }
+  .dispatch-form :deep(.el-textarea__inner) {
+    padding: 8px 12px 20px;
+  }
+  .dispatch-delivery {
+    padding: 10px 12px;
+    margin-bottom: 12px;
+  }
+  .dispatch-submit {
+    position: sticky;
+    bottom: 0;
+    z-index: 5;
+    padding: 10px 0;
+    margin-top: 12px;
+    background: #fff;
+  }
+  .dispatch-preview-body {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+  }
+  .dispatch-preview-label,
+  .dispatch-preview-content {
+    grid-column: 1 / -1;
+  }
+  .dispatch-preview-item {
+    margin: 0;
+    padding-top: 12px;
   }
 }
 @media (max-width: 680px) {
   .dispatch-heading {
     align-items: flex-start;
+    flex-direction: column;
     gap: 12px;
   }
   .dispatch-heading h1 {
@@ -1002,18 +1007,6 @@ onMounted(() => run(load));
   }
   .dispatch-submit .el-button {
     width: 100%;
-  }
-  .dispatch-records-heading {
-    padding: 18px;
-    flex-direction: column;
-    align-items: stretch;
-    gap: 16px;
-  }
-  .dispatch-records-actions .el-input {
-    width: 100%;
-  }
-  .dispatch-records-actions {
-    min-width: 0;
   }
   .dispatch-result {
     padding: 18px;

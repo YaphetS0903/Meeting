@@ -9,9 +9,10 @@ from app.core.config import get_settings
 from app.main import DirectAssignmentCreate, create_direct_assignment
 from app.models import NativeTodoLink, OutboxEvent, SystemSetting, Task
 from app.schemas import TaskChange
-from app.services import app_native_todo, integrations, recurrence
+from app.services import app_native_todo, integrations
 from app.services.business import change_task
 from app.task_management_api import TaskTransfer, transfer
+from tests.role_helpers import dispatch_grant
 
 
 @pytest.fixture
@@ -48,6 +49,7 @@ def app_todos(db, team, monkeypatch):
 
 
 def direct_task(db, team, *, issuer=None, content="完成本周设备维护"):
+    if issuer and not issuer.is_admin: dispatch_grant(db,issuer,"all")
     issuer = issuer or team["host"]
     result = create_direct_assignment(
         DirectAssignmentCreate(
@@ -175,27 +177,6 @@ def test_transfer_queues_current_version_confirmation_for_new_issuer(db, team, a
     assert app_todos[0]["users"] == [team["host"].wecom_id]
 
 
-def test_recurring_direct_task_invites_issuer_once_and_still_notifies_owner(db, team, app_todos, monkeypatch):
-    monkeypatch.setattr(recurrence, "today", lambda: date(2026, 10, 20))
-    source = direct_task(db, team)
-    rule = recurrence.enable_rule(
-        db,
-        team["host"],
-        source.id,
-        recurrence.RecurrenceCreate(expected_version=1, frequency="weekly", reason="每周维护"),
-    )
-    assert recurrence.generate_instances(db, date(2026, 10, 26)) == 1
-    assert recurrence.generate_instances(db, date(2026, 10, 26)) == 0
-    generated = db.scalar(select(Task).where(Task.recurrence_key == rule.id, Task.id != source.id))
-    events = confirmations(db, generated)
-    assert len(events) == 1
-    assert events[0].payload["user_ids"] == [team["host"].id]
-    assert events[0].payload["task_version"] == generated.version
-    owner_message = db.scalar(select(OutboxEvent).where(OutboxEvent.event_key == f"task:{generated.id}:recurring"))
-    assert owner_message and owner_message.payload["user_ids"] == [team["a"].id]
-    integrations.send_wecom(db, events[0])
-    assert app_todos[0]["users"] == [team["host"].wecom_id]
-    assert "截止日期：2026-10-30" in app_todos[0]["card"]["description"]
 
 
 class CardParser(HTMLParser):
@@ -230,13 +211,13 @@ def test_direct_cards_fit_escaped_utf8_budget_and_preserve_deadline_and_issuer(
     card = app_todos[0]["card"]
     description = card["description"]
     assert len(description.encode("utf-8")) <= 512
-    assert "截止日期：2026-10-23" in description
+    assert "计划完成日期：2026-10-23" in description
     assert "派发人：" + escape(team["host"].name) in description
     assert card["url"].endswith("native_confirm=1" if confirmation else task.id)
     assert "�" not in description and "…" in description
     parser = CardParser()
     parser.feed(description)
-    assert parser.tags == ["br"] * 4
+    assert parser.tags == ["br"] * (3 if confirmation else 2)
     assert all(entity in {"&amp;", "&lt;", "&gt;", "&quot;", "&#x27;"} for entity in parser.entities)
     # Every ampersand must begin a complete escape, even when the body runs out of bytes.
     without_entities = description
@@ -251,5 +232,5 @@ def test_long_escaped_issuer_name_cannot_consume_card_footer_budget(db, team, ap
     integrations.send_wecom(db, confirmations(db, task)[0])
     description = app_todos[0]["card"]["description"]
     assert len(description.encode("utf-8")) <= 512
-    assert "截止日期：2026-10-23" in description and "派发人：" in description
-    assert description.endswith("确认后责任人直接收到待办。")
+    assert "计划完成日期：2026-10-23" in description and "派发人：" in description
+    assert description.endswith("确认后向责任人创建待办")

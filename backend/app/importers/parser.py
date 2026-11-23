@@ -11,6 +11,7 @@ import unicodedata
 import warnings
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 from zipfile import ZipFile
@@ -312,6 +313,66 @@ def parse_grid(sheet: str, grid: list[list]) -> Candidate | None:
     return candidate
 
 
+def parse_export_grid(sheet: str, grid: list[list]) -> Candidate | None:
+    """Recognize our rendered exports without guessing arbitrary spreadsheet layouts."""
+    sections = {"上期任务回顾": "review", "本次工作部署": "new"}
+    headers = ["序号", "项目 / 类别", "任务内容及要求", "责任人", "计划完成日期",
+               "结果 / 验证人", "输出物 / 备注"]
+    if (sheet not in sections or len(grid) < 4
+            or [text(v) for v in grid[3]] != headers
+            or not text(grid[2][0]).startswith(sheet)):
+        return None
+    metadata = text(grid[1][0])
+    labels = "日期|时间|地点|部门|主持人|会议类型"
+    fields = dict(re.findall(rf"(?:^|  )({labels})[:：](.*?)(?=  (?:{labels})[:：]|$)", metadata))
+    if not {"日期", "时间", "地点", "部门", "主持人"} <= fields.keys():
+        return None
+    p = new_payload(text(grid[0][0]))
+    p.update(department_name=fields["部门"], raw_meeting_date=fields["日期"],
+             meeting_time=fields["时间"], location=fields["地点"], host_name=fields["主持人"])
+    p["meeting_date"], _ = parse_date(fields["日期"])
+    p["kind"] = {"部门例会": "department", "专项会议": "special"}.get(fields.get("会议类型"), "unknown")
+    candidate = Candidate(sheet, p)
+    rows = []
+    footer = {}
+    footer_labels = {"正式决议": "decisions", "参会人员": "attendee_names",
+                     "现场参会": "onsite_names", "线上参会": "online_names",
+                     "缺席及原因": "absentees", "编制人": "recorder_name"}
+    for rn, row in enumerate(grid[4:], 5):
+        # Continuation chunks must retain their boundary whitespace until reassembled.
+        vals = ["" if v is None else str(v) for v in row]
+        vals[0] = text(row[0])
+        if vals[0] in footer_labels:
+            key = footer_labels[vals[0]]
+            footer[key] = footer.get(key, "") + vals[1]
+        elif re.fullmatch(r"\d+", vals[0]):
+            rows.append([rn, vals])
+        elif vals[0] == "续":
+            if not rows:
+                raise ValueError("导出表存在无对应事项的续行，请核对原文件")
+            for col in range(1, 7):
+                rows[-1][1][col] += vals[col]
+    for rn, vals in rows:
+        values = dict(category=vals[1], content=vals[2], owners=vals[3], due=vals[4], notes=vals[6])
+        values["status" if sections[sheet] == "review" else "verifier"] = vals[5]
+        item, issues = make_item(values, sections[sheet], rn, sheet,
+                                 int(p["meeting_date"][:4]) if p["meeting_date"] else None)
+        idx = len(p["items"])
+        if vals[6]:
+            issues.append(Issue("combined_notes", "notes",
+                                "导出表的输出物、备注和排除依据合并显示；原文已保留在备注，请核对并按需拆分",
+                                rn, vals[6]))
+        for issue in issues:
+            issue.field_path = f"items.{idx}.{issue.field_path}"
+        candidate.issues.extend(issues)
+        p["items"].append(item)
+    p.update(footer)
+    p["attendee_names"] = split_people("、".join(
+        footer.get(key, "") for key in ("attendee_names", "onsite_names", "online_names")
+    ))
+    return candidate
+
+
 def check_zip(path: Path):
     with ZipFile(path) as z:
         if len(z.infolist()) > 10000 or sum(x.file_size for x in z.infolist()) > 250 * 1024 * 1024:
@@ -402,7 +463,7 @@ def parse_file(path: Path) -> ParsedFile:
         if content[:2] == b"PK":
             check_zip(path)
             with warnings.catch_warnings(record=True) as caught:
-                workbook = openpyxl.load_workbook(path.open("rb"), data_only=True)
+                workbook = openpyxl.load_workbook(BytesIO(content), data_only=True)
             for warning in caught:
                 result.diagnostics.append({"code": "format_warning", "message": str(warning.message)})
             for sheet in workbook:
@@ -452,8 +513,25 @@ def parse_file(path: Path) -> ParsedFile:
             workbook.release_resources()
         else:
             raise ValueError("文件内容不是支持的 XLS、XLSX 或 DOCX")
+        exported = {}
         for name, grid in sheets:
             try:
+                candidate = parse_export_grid(name, grid)
+                if candidate:
+                    key = digest({k: v for k, v in candidate.payload.items() if k != "items"})
+                    if key in exported:
+                        previous = exported[key]
+                        offset = len(previous.payload["items"])
+                        for issue in candidate.issues:
+                            issue.field_path = re.sub(r"^items\.(\d+)\.",
+                                lambda match: f"items.{int(match[1]) + offset}.", issue.field_path)
+                        previous.payload["items"].extend(candidate.payload["items"])
+                        previous.issues.extend(candidate.issues)
+                        previous.sheet += " / " + name
+                    else:
+                        exported[key] = candidate
+                        result.candidates.append(candidate)
+                    continue
                 candidate = parse_grid(name, grid)
                 if candidate:
                     result.candidates.append(candidate)
@@ -463,6 +541,8 @@ def parse_file(path: Path) -> ParsedFile:
                 result.diagnostics.append(
                     {"code": "sheet_parse_error", "sheet": name, "message": str(exc)[:500]}
                 )
+        for candidate in exported.values():
+            finish_candidate(candidate)
         if not result.candidates:
             result.diagnostics.append({"code": "no_meeting", "message": "没有识别到会议区域，请人工指定"})
     except Exception as exc:

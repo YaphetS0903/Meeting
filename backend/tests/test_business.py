@@ -1,3 +1,5 @@
+from tests.role_helpers import grant as new_grant, dispatch_grant, report_grant
+from app.services.role_migration import rule
 from datetime import date, datetime, timezone
 
 import pytest
@@ -99,7 +101,7 @@ def test_shared_task_apply_verify_and_frozen_history(db, team, draft_factory, mo
         "未完成",
     ]
     carried = carry_forward(db, team["host"], team["series"].id)
-    assert carried[0]["status"] == "已完成"
+    assert carried == []  # A released failed assessment is not automatically carried again.
     published(
         db,
         team,
@@ -199,6 +201,7 @@ def test_only_verifier_can_close_and_rejection_does_not_close(db, team, draft_fa
 
 def test_department_and_related_permissions(db, team, draft_factory):
     meeting = published(db, team, draft_factory())
+    new_grant(db,team["colleague"],[rule("meetings",["view"])])
     meeting_access(db, team["colleague"], meeting)
     with pytest.raises(HTTPException):
         meeting_access(db, team["outsider"], meeting)
@@ -215,14 +218,20 @@ def test_person_department_snapshot_survives_transfer(db, team, draft_factory):
     assert len(result["groups"]) == 1 and result["groups"][0]["id"] == team["dep"].id
 
 
-def test_overdue_undue_strictly_greater_not_equal(db, team, draft_factory):
+@pytest.mark.parametrize("historical", [False, True])
+def test_overdue_undue_rejected_online_but_preserved_in_history(db, team, draft_factory, historical):
     published(db, team, draft_factory(section="review", when=date(2026, 8, 17)), historical=True)
     meeting = create_meeting(
-        db, team["host"], draft_factory(section="review", when=date(2026, 8, 18)), historical=True
+        db, team["host"], draft_factory(section="review", when=date(2026, 8, 18)), historical=historical
     )
+    if historical:
+        publish(db, team["host"], meeting.id, PublishRequest(expected_version=1))
+        assert meeting.draft["items"][0]["status"] == "未到期"
+        return
     with pytest.raises(HTTPException) as error:
         publish(db, team["host"], meeting.id, PublishRequest(expected_version=1))
     assert error.value.status_code == 422
+    assert "不能标为未到期" in str(error.value.detail)
 
 
 def test_historical_import_does_not_notify_or_create_live_tasks(db, team, draft_factory):
@@ -294,15 +303,15 @@ def test_idempotent_application_and_validation(db, team, draft_factory):
     assert db.scalar(select(func.count()).select_from(CompletionRequest)) == 1
 
 
-def test_unverified_task_cannot_be_written_complete(db, team, draft_factory):
+def test_host_publishing_completed_minutes_confirms_the_task(db, team, draft_factory):
     published(db, team, draft_factory())
     task = get_task(db)
     meeting = create_meeting(
         db, team["host"], draft_factory(section="review", status="已完成", task_id=task.id, task_version=1)
     )
-    with pytest.raises(HTTPException) as error:
-        publish(db, team["host"], meeting.id, PublishRequest(expected_version=1))
-    assert error.value.status_code == 422
+    publish(db, team["host"], meeting.id, PublishRequest(expected_version=1))
+    assert meeting.published_version == 1
+    assert task.closed_at is not None and task.status == "关闭"
 
 
 def test_period_filters_use_meeting_date(db, team, draft_factory):

@@ -5,11 +5,14 @@ from collections import Counter
 from sqlalchemy import or_, select
 
 from app.models import (
+    AuditLog,
     Assessment,
     CompletionRequest,
     Department,
     ImportCandidate,
     ImportSource,
+    Meeting,
+    MeetingVersion,
     OutboxEvent,
     Task,
     ValidationIssue,
@@ -20,6 +23,38 @@ from app.services.departments import department_paths
 from app.services.historical_links import work_identity
 
 STATES = ["已完成", "未完成", "未到期", "不统计", "关闭"]
+
+
+def continuation_origins(db, meeting):
+    """Recover ordering evidence for existing drafts without rewriting history."""
+    from app.services.business import continuation_key, continuation_source_rows
+    from app.services.meeting_items import continuation_origin
+
+    link = db.scalar(select(AuditLog).where(
+        AuditLog.entity_id == meeting.id, AuditLog.action == "meeting.continue",
+    ).order_by(AuditLog.created_at.desc(), AuditLog.id.desc()).limit(1))
+    if not link or not link.after:
+        return {}
+    source = db.get(Meeting, link.after.get("source_meeting_id"))
+    if not source:
+        return {}
+    syncs = db.scalars(select(AuditLog).where(
+        AuditLog.entity_id == meeting.id, AuditLog.action == "meeting.continuation.sync",
+        AuditLog.after["source_meeting_id"].as_string() == source.id,
+    ))
+    number = max([link.after.get("source_version", 0)] + [log.after.get("source_version", 0) for log in syncs])
+    version = db.scalar(select(MeetingVersion).where(
+        MeetingVersion.meeting_id == source.id, MeetingVersion.number == number,
+    ))
+    if not version:
+        return {}
+    rows = version.snapshot.get("items", [])
+    by_key = continuation_source_rows(source, version.snapshot)
+    return {
+        row["id"]: continuation_origin(by_key[key], rows)
+        for row in meeting.draft.get("items", [])
+        if row.get("section") == "review" and (key := continuation_key(row)) in by_key
+    }
 
 
 def import_context(db, user, meeting):
@@ -181,6 +216,7 @@ def meeting_context(db, user, meeting, versions, can_edit):
             targets = {
                 event.payload.get("task_id"),
                 *event.payload.get("reminder_task_ids", []),
+                *(item["task_id"] for item in event.payload.get("deadline_items", [])),
                 *(request_tasks.get(r) for r in event.payload.get("verification_request_ids", [])),
             }.intersection(accessible)
             if not targets:
@@ -202,6 +238,7 @@ def meeting_context(db, user, meeting, versions, can_edit):
                 break
     return {
         "assessments": stats,
+        "continuation_origins": continuation_origins(db, meeting) if can_edit else {},
         "task_links": links,
         "task_notifications": notifications,
         **import_context(db, user, meeting),

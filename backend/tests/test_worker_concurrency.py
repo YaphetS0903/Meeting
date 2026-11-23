@@ -21,9 +21,11 @@ def test_outbox_committed_delivery_is_not_repeated(db, team, draft_factory, monk
     calls = []
     monkeypatch.setattr(worker, "send_wecom", lambda s, e: calls.append(e.id) or {"msgid": "test"})
     monkeypatch.setattr(worker, "generate_exports", lambda *args: [])
+    expected = set(db.scalars(select(OutboxEvent.id).where(OutboxEvent.channel == "wecom")))
     worker.dispatch()
     worker.dispatch()
-    assert len(calls) == 1
+    assert set(calls) == expected
+    assert len(calls) == len(expected) == 2  # Task assignment and meeting publication, once each.
     db.expire_all()
     assert all(e.state == "sent" for e in db.scalars(select(OutboxEvent)))
 

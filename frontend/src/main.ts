@@ -4,12 +4,18 @@ import ElementPlus from "element-plus";
 import zhCn from "element-plus/es/locale/lang/zh-cn";
 import "element-plus/dist/index.css";
 import "./style.css";
+import "./laptop.css";
+import "./workspace-ui.css";
 import App from "./App.vue";
 const router = createRouter({
   history: createWebHistory(),
   routes: [
     { path: "/", redirect: "/meetings" },
     { path: "/meetings", component: () => import("./pages/Meetings.vue") },
+    {
+      path: "/history-meetings",
+      component: () => import("./pages/HistoryMeetings.vue"),
+    },
     { path: "/meetings/:id", component: () => import("./pages/Meeting.vue") },
     { path: "/tasks", component: () => import("./pages/Tasks.vue") },
     {
@@ -21,12 +27,24 @@ const router = createRouter({
       component: () => import("./pages/Assignments.vue"),
     },
     {
+      path: "/my-assignments",
+      component: () => import("./pages/MyAssignments.vue"),
+    },
+    {
       path: "/verifications",
       component: () => import("./pages/Verifications.vue"),
     },
-    { path: "/validation", component: () => import("./pages/Validation.vue") },
+    { path: "/validation", redirect: "/meetings" },
     { path: "/reports", component: () => import("./pages/Reports.vue") },
     { path: "/settings", component: () => import("./pages/Settings.vue") },
+    {
+      path: "/operation-logs",
+      component: () => import("./pages/OperationLogs.vue"),
+    },
+    {
+      path: "/settings/employees",
+      component: () => import("./pages/Employees.vue"),
+    },
     { path: "/:pathMatch(.*)*", redirect: "/meetings" },
   ],
 });

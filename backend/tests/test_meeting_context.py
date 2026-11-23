@@ -39,6 +39,9 @@ def test_publication_filter_separates_drafts_published_and_revising(client, db, 
     published = issue(db, team, draft_factory())
     revising = issue(db, team, draft_factory())
     revision(db, team["host"], revising.id, "补记决议")
+    revised = MeetingDraft.model_validate(revising.draft)
+    revised.decisions = "补充的待发布会议决议"
+    save_meeting(db, team["host"], revising.id, revised, revising.draft_version)
     for state, expected in [("draft", draft), ("published", published), ("revising", revising)]:
         result = client.get("/api/meetings", params={"publication": state}, headers=auth(team["host"])).json()
         assert result["total"] == 1 and result["items"][0]["id"] == expected.id

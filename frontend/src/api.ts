@@ -1,5 +1,6 @@
 import { reactive } from "vue";
 import { ElMessage } from "element-plus";
+import { affectsMeetingLists, announceMeetingChange } from "./meetingListSync";
 export const state = reactive({
   me: null as any,
   directory: { users: [], departments: [], series: [] } as any,
@@ -31,34 +32,93 @@ export function query(data: Record<string, any>) {
       .map(([k, v]) => [k, String(v)]),
   ).toString();
 }
+export class ApiResponseError extends Error {
+  constructor(
+    message: string,
+    public outcomeUnknown = false,
+  ) {
+    super(message);
+    this.name = "ApiResponseError";
+  }
+}
+function expireSession(status: number) {
+  if (status === 401) {
+    sessionStorage.removeItem("token");
+    state.me = null;
+  }
+}
+async function responseError(res: Response, fallback: string) {
+  expireSession(res.status);
+  let detail: any;
+  try {
+    const text = await res.text();
+    detail = text.trim() ? JSON.parse(text).detail : null;
+  } catch {
+    // Gateways can return HTML, an empty body, or a truncated error document.
+  }
+  const message = detail
+    ? typeof detail === "string"
+      ? detail
+      : JSON.stringify(detail)
+    : res.status === 401
+      ? "登录已过期，请重新登录"
+      : `${fallback}（HTTP ${res.status}），请稍后重试`;
+  return new ApiResponseError(message);
+}
 export async function api(
   path: string,
   method = "GET",
   body?: any,
+  options: { background?: boolean } = {},
 ): Promise<any> {
   const headers: Record<string, string> = {
     Authorization: `Bearer ${sessionStorage.getItem("token") || ""}`,
   };
   if (body && !(body instanceof FormData))
     headers["Content-Type"] = "application/json";
-  const res = await fetch("/api" + path, {
-    method,
-    headers,
-    body:
-      body instanceof FormData ? body : body ? JSON.stringify(body) : undefined,
-  });
-  if (!res.ok) {
-    const value = await res.json().catch(() => ({ detail: "服务暂时不可用" }));
-    if (res.status === 401) {
-      sessionStorage.removeItem("token");
-      state.me = null;
-    }
-    const detail = value.detail;
-    throw new Error(
-      typeof detail === "string" ? detail : JSON.stringify(detail),
+  const mutating = !["GET", "HEAD"].includes(method.toUpperCase());
+  if (options.background === true && method.toUpperCase() === "GET")
+    headers["X-Operation-Context"] = "background";
+  let res: Response;
+  try {
+    res = await fetch("/api" + path, {
+      method,
+      headers,
+      cache: mutating ? undefined : "no-store",
+      body:
+        body instanceof FormData
+          ? body
+          : body
+            ? JSON.stringify(body)
+            : undefined,
+    });
+  } catch {
+    throw new ApiResponseError(
+      mutating
+        ? "网络连接中断，操作结果尚未确认，请先核对结果再重试"
+        : "网络连接中断，请稍后重试",
+      mutating,
     );
   }
-  return res.status === 204 ? null : res.json();
+  if (!res.ok) {
+    const error = await responseError(res, "服务器处理失败");
+    error.outcomeUnknown = mutating && res.status >= 500;
+    throw error;
+  }
+  if (mutating && affectsMeetingLists(path)) announceMeetingChange();
+  if (res.status === 204) return null;
+  try {
+    const text = await res.text();
+    if (!text.trim()) throw new Error("empty response");
+    return JSON.parse(text);
+  } catch {
+    throw new ApiResponseError(
+      mutating
+        ? "服务器未返回完整数据，操作结果尚未确认，请先核对结果再重试"
+        : "服务器返回的数据不完整，请稍后重新加载",
+      mutating,
+    );
+  }
 }
 export async function run(fn: () => Promise<any>) {
   try {
@@ -69,16 +129,36 @@ export async function run(fn: () => Promise<any>) {
     return null;
   }
 }
+let directoryLoadedAt = 0;
+let directoryRequest: Promise<any> | null = null;
+export async function refreshDirectory() {
+  if (Date.now() - directoryLoadedAt < 60000) return state.directory;
+  if (directoryRequest) return directoryRequest;
+  const token = sessionStorage.getItem("token");
+  directoryRequest = api("/directory")
+    .then((directory) => {
+      if (token === sessionStorage.getItem("token")) {
+        state.directory = directory;
+        directoryLoadedAt = Date.now();
+      }
+      return directory;
+    })
+    .finally(() => {
+      directoryRequest = null;
+    });
+  return directoryRequest;
+}
 export async function loadSession() {
   const [me, directory] = await Promise.all([api("/me"), api("/directory")]);
   state.directory = directory;
+  directoryLoadedAt = Date.now();
   state.me = me;
 }
 export async function download(path: string, name: string) {
   const res = await fetch("/api" + path, {
     headers: { Authorization: `Bearer ${sessionStorage.getItem("token")}` },
   });
-  if (!res.ok) throw new Error((await res.json()).detail || "下载失败");
+  if (!res.ok) throw await responseError(res, "下载失败");
   const url = URL.createObjectURL(await res.blob());
   const a = document.createElement("a");
   a.href = url;
@@ -99,16 +179,19 @@ export async function previewFile(
     },
     body: JSON.stringify({ expected_version: version, format }),
   });
-  if (!res.ok) throw new Error((await res.json()).detail || "预览生成失败");
-  return res.blob();
+  if (!res.ok) throw await responseError(res, "预览生成失败");
+  const blob = await res.blob();
+  if (!blob.size) throw new Error("预览服务返回空文件，请重新生成预览");
+  return blob;
 }
 export const person = (id: string) =>
   state.directory.users.find((x) => x.id === id)?.name || "未选择";
-export function departmentPath(id: string | null | undefined) {
+export function departmentPath(
+  id: string | null | undefined,
+  options: any[] = state.directory.departments,
+) {
   if (!id) return "专项会议（无所属部门）";
-  const departments = new Map(
-    state.directory.departments.map((item: any) => [item.id, item]),
-  );
+  const departments = new Map(options.map((item: any) => [item.id, item]));
   const names: string[] = [];
   const visited = new Set<string>();
   let current: any = departments.get(id);
@@ -124,5 +207,23 @@ export const rate = (value: number | null) =>
 export function localDate(value = new Date()) {
   return new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Shanghai" }).format(
     value,
+  );
+}
+
+export function hasBusinessPermission(
+  module: string,
+  action: string,
+  departmentId?: string | null,
+  related = false,
+) {
+  if (state.me?.is_admin) return true;
+  const scope = state.me?.business_permissions?.[module]?.[action];
+  if (!scope) return !state.me?.business_permissions;
+  return !!(
+    scope.all ||
+    (related && scope.self) ||
+    (departmentId
+      ? scope.department_ids.includes(departmentId)
+      : scope.department_ids.length || scope.self)
   );
 }

@@ -1,6 +1,6 @@
 from datetime import date
 
-from app.models import ImportBatch, ImportCandidate, ImportSource, ValidationIssue
+from app.models import Department, ImportBatch, ImportCandidate, ImportSource, ValidationIssue
 from app.services.reporting import report
 
 
@@ -29,7 +29,8 @@ def result(db, user, **kwargs):
 
 def test_department_user_sees_own_quality_without_unrelated_counts(db, team):
     s = source(db, team)
-    candidate(db, s, {"department_id": team["dep"].id, "meeting_date": "2026-08-10"})
+    candidate(db, s, {"department_id": team["dep"].id, "meeting_date": "2026-08-10",
+                      "items": [{"section": "review", "owner_ids": [team["a"].id]}]})
     candidate(db, s, {"department_id": team["other"].id, "meeting_date": "2026-08-10"})
     candidate(db, s, {"department_id": team["dep"].id, "meeting_date": "2026-07-10"})
     r = result(db, team["a"])
@@ -38,16 +39,16 @@ def test_department_user_sees_own_quality_without_unrelated_counts(db, team):
     assert result(db, team["host"])["pending_meetings"] == 2
 
 
-def test_unknown_scope_warns_without_exposing_other_department_data(db, team):
+def test_unknown_scope_and_file_issues_do_not_disclose_unrelated_work(db, team):
     s = source(db, team)
     c = candidate(db, s, {"title": "待确认", "meeting_date": "2026-08-10"})
     r = result(db, team["a"])
-    assert r["pending_meetings"] == 0 and r["quality"] == "待校验" and r["quality_note"]
+    assert r["pending_meetings"] == 0 and r["quality"] == "已确认数据" and not r["quality_note"]
     c.corrected = {"department_id": team["other"].id, "meeting_date": "2026-08-10"}
     assert result(db, team["a"])["quality"] == "已确认数据"
     db.add(ValidationIssue(source_id=s.id, code="parse_error", message="无法读取"))
     r = result(db, team["a"])
-    assert r["pending_file_issues"] == 0 and r["quality"] == "待校验"
+    assert r["pending_file_issues"] == 0 and r["quality"] == "已确认数据"
     assert result(db, team["host"])["pending_file_issues"] == 1
 
 
@@ -89,3 +90,21 @@ def test_special_staging_is_not_counted_under_each_department_filter(db, team):
 
     assert result(db, team["host"])["pending_meetings"] == 1
     assert result(db, team["host"], department_id=team["dep"].id)["pending_meetings"] == 0
+
+
+def test_parent_people_report_quality_includes_descendant_owners_only(db, team):
+    parent = Department(name="支持中心")
+    db.add(parent)
+    db.flush()
+    team["dep"].parent_id = parent.id
+    imported = source(db, team)
+    for owner in (team["a"], team["outsider"]):
+        candidate(db, imported, {
+            "meeting_date": "2026-08-10",
+            "department_id": team["other"].id,
+            "items": [{"section": "review", "owner_ids": [owner.id]}],
+        })
+    people = result(db, team["host"], group_by="department_people", department_id=parent.id)
+    assert people["pending_meetings"] == 1
+    historical = result(db, team["host"], group_by="person_department", department_id=parent.id)
+    assert historical["pending_meetings"] == 0

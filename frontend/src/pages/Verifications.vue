@@ -11,10 +11,10 @@ const rows = ref<any[]>([]),
   busy = ref(false),
   pending = ref(true),
   working = ref("");
-async function load() {
+async function load(background = false) {
   busy.value = true;
   try {
-    rows.value = await api("/verifications");
+    rows.value = await api("/verifications", "GET", undefined, { background });
     if (requested) {
       const target = rows.value.find((row) => row.id === requested);
       missingRequested.value = !target;
@@ -43,7 +43,7 @@ async function verify(r: any, decision: string) {
   try {
     await api("/verifications/" + r.id, "POST", { decision, opinion: value });
     ElMessage.success("验证结果已保存");
-    await load();
+    await load(true);
   } finally {
     working.value = "";
   }
@@ -53,9 +53,7 @@ onMounted(() => run(load));
 <template>
   <section class="page-heading">
     <div>
-      <p class="eyebrow">VERIFICATION</p>
       <h1>待我验证</h1>
-      <p class="muted">核对完成说明及证据，一次验证统一关闭共同任务。</p>
     </div>
     <el-switch v-model="pending" active-text="只看待验证" />
   </section>

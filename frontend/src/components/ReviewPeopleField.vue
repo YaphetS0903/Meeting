@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { person } from "../api";
+import { person, state } from "../api";
+import { isEmployeeAccount } from "../people";
 import PeopleSelect from "./PeopleSelect.vue";
 
 const props = defineProps<{
@@ -25,6 +26,11 @@ const visibleSuggestions = computed(() =>
     (suggestion: any) =>
       suggestion.user_id &&
       suggestion.name &&
+      isEmployeeAccount(
+        state.directory.users.find(
+          (user: any) => user.id === suggestion.user_id,
+        ) || suggestion,
+      ) &&
       !ids.value.includes(suggestion.user_id),
   ),
 );

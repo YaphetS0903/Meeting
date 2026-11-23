@@ -65,6 +65,43 @@ class Membership(Base):
     department_id: Mapped[str] = mapped_column(ForeignKey("departments.id"), primary_key=True)
 
 
+class ReportDepartmentGrant(Base):
+    __tablename__ = "report_department_grants"
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    department_id: Mapped[str] = mapped_column(
+        ForeignKey("departments.id", ondelete="CASCADE"), primary_key=True
+    )
+
+
+class EmployeeRoleGrant(Base):
+    __tablename__ = "employee_role_grants"
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    role: Mapped[str] = mapped_column(String(40), primary_key=True)
+    __table_args__ = (
+        CheckConstraint(
+            "role IN ('department_reports', 'department_meetings', 'company_dispatch')",
+            name="ck_employee_role",
+        ),
+    )
+
+
+class BusinessRole(Identity, Base):
+    __tablename__ = "business_roles"
+    name: Mapped[str] = mapped_column(String(120), unique=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    rules: Mapped[list] = mapped_column(JSON, default=list)
+
+
+class BusinessRoleAssignment(Base):
+    __tablename__ = "business_role_assignments"
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    role_id: Mapped[str] = mapped_column(
+        ForeignKey("business_roles.id", ondelete="CASCADE"), primary_key=True
+    )
+
+
 class UserAlias(Identity, Base):
     __tablename__ = "user_aliases"
     alias: Mapped[str] = mapped_column(String(120), index=True)
@@ -158,6 +195,20 @@ class Task(Identity, Base):
         UniqueConstraint("recurrence_key", "recurrence_period", name="uq_task_recurrence_period"),
         UniqueConstraint("historical_work_id", name="uq_task_historical_work"),
     )
+
+
+class TaskCarryReplacement(Identity, Base):
+    """Confirmed document continuity without merging live task identities."""
+
+    __tablename__ = "task_carry_replacements"
+    previous_task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), unique=True)
+    next_task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), index=True)
+    meeting_id: Mapped[str] = mapped_column(ForeignKey("meetings.id", ondelete="CASCADE"), index=True)
+    meeting_version: Mapped[int] = mapped_column(Integer)
+    previous_task_version: Mapped[int] = mapped_column(Integer)
+    actor_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    reason: Mapped[str] = mapped_column(Text)
+    __table_args__ = (CheckConstraint("previous_task_id <> next_task_id", name="carry_distinct_tasks"),)
 
 
 class DirectAssignmentRequest(Identity, Base):
@@ -271,6 +322,22 @@ class Attachment(Identity, Base):
     meeting_version: Mapped[int | None] = mapped_column(Integer)
 
 
+class MeetingSheetImport(Identity, Base):
+    """An immutable recognition source, separate from confirmed historical imports."""
+
+    __tablename__ = "meeting_sheet_imports"
+    series_id: Mapped[str | None] = mapped_column(ForeignKey("meeting_series.id", ondelete="SET NULL"))
+    creator_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    attachment_id: Mapped[str] = mapped_column(ForeignKey("attachments.id"))
+    candidates: Mapped[list] = mapped_column(JSON, default=list)
+    diagnostics: Mapped[list] = mapped_column(JSON, default=list)
+    selected_index: Mapped[int | None] = mapped_column(Integer)
+    meeting_id: Mapped[str | None] = mapped_column(
+        ForeignKey("meetings.id", ondelete="SET NULL"), unique=True
+    )
+    fingerprint: Mapped[str | None] = mapped_column(String(64), unique=True)
+
+
 class ImportBatch(Identity, Base):
     __tablename__ = "import_batches"
     name: Mapped[str] = mapped_column(String(250))
@@ -347,6 +414,11 @@ class AuditLog(Identity, Base):
     before: Mapped[dict | None] = mapped_column(JSON)
     after: Mapped[dict | None] = mapped_column(JSON)
     reason: Mapped[str] = mapped_column(Text, default="")
+    context: Mapped[dict] = mapped_column(JSON, default=dict, server_default="{}")
+    __table_args__ = (
+        Index("ix_audit_log_created_id", "created_at", "id"),
+        Index("ix_audit_log_actor_created", "actor_id", "created_at"),
+    )
 
 
 class SystemSetting(Base):
