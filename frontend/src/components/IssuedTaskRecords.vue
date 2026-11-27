@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { chineseError } from "../errorMessages";
 import { computed, onMounted, ref, useId } from "vue";
 import { api } from "../api";
 import { isEmployeeAccount } from "../people";
@@ -109,7 +110,10 @@ async function load() {
     emit("loaded", rows.value);
   } else {
     rows.value = [];
-    loadError.value = issued.reason?.message || "服务暂时不可用";
+    loadError.value = chineseError(
+      issued.reason,
+      "派发记录暂时无法读取，请稍后重试",
+    );
   }
   recordsPage.value = 1;
   loading.value = false;

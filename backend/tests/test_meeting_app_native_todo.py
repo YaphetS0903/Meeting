@@ -135,6 +135,7 @@ def test_plan_reports_unavailable_and_cross_meeting_arrangements_without_leaking
     meeting, _ = meeting_app
     other_draft = draft_factory()
     other_draft.host_id = other_draft.recorder_id = team["colleague"].id
+    other_draft.series_id = None
     other = create_meeting(db, team["colleague"], other_draft)
     publish(db, team["colleague"], other.id, PublishRequest(expected_version=1))
     foreign = db.scalar(select(Task).where(Task.source_meeting_id == other.id))

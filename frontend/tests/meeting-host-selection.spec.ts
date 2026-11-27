@@ -109,7 +109,8 @@ async function fixture(page: Page, existing = false) {
       ? "/meetings/saved-host-meeting"
       : "/meetings/new?series=series:weekly",
   );
-  await page.getByRole("button", { name: "编辑", exact: true }).click();
+  if (existing)
+    await page.getByRole("button", { name: "编辑", exact: true }).click();
   await expect(
     page.getByRole("combobox", { name: "主持人", exact: true }),
   ).toBeVisible();
@@ -130,6 +131,9 @@ for (const width of [1440, 390]) {
       page.getByRole("option", { name: "张离职", exact: true }),
     ).toHaveCount(0);
     await page.getByRole("option", { name: "张主持", exact: true }).click();
+    await page
+      .getByRole("button", { name: "确认并填写任务单", exact: true })
+      .click();
     await expect(
       page.locator(".attendee-person").filter({ hasText: "张主持" }),
     ).toContainText("主持人");

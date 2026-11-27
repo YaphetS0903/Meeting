@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { chineseError } from "../errorMessages";
 import { computed, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
@@ -44,7 +45,7 @@ async function loadRoles() {
     grants.value = assignments;
     rolesLoaded.value = true;
   } catch (error: any) {
-    rolesError.value = error.message || "员工角色读取失败，请重试";
+    rolesError.value = chineseError(error, "员工角色读取失败，请重试");
   } finally {
     rolesLoading.value = false;
   }
@@ -79,7 +80,7 @@ async function saveRoles() {
     roleDialog.value = false;
     ElMessage.success(`${selectedEmployee.value.name}的角色已更新`);
   } catch (error: any) {
-    saveError.value = error.message || "角色保存失败，请重试";
+    saveError.value = chineseError(error, "角色保存失败，请重试");
   } finally {
     savingRoles.value = false;
   }

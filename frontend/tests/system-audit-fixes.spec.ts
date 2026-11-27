@@ -70,15 +70,11 @@ test("报表汇总不预装明细，弹窗按本人和结果分页读取，读�
       };
     }
   });
-  await page.goto("/reports");
+  await page.goto("/reports?view=regular");
   await expect(
     page.getByRole("heading", { name: "我的已评定任务情况", exact: true }),
   ).toBeVisible();
-  await expect(
-    page.getByText("仅统计本人已发布的上期评定，本次新安排暂不计入。", {
-      exact: true,
-    }),
-  ).toBeVisible();
+  await expect(page.getByText("林明（仅本人）", { exact: true })).toBeVisible();
   expect(
     reads.every((u) => u.searchParams.get("include_details") === "false"),
   ).toBeTruthy();

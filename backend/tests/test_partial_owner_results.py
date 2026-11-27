@@ -16,6 +16,7 @@ from app.models import Assessment, MeetingVersion, Task
 from app.schemas import MeetingDraft, MeetingItem, PublishRequest
 from app.services import business
 from app.services.exports import pdf_minutes, xlsx_minutes
+from app.services.performance_reporting import performance_report
 from app.services.reporting import report
 
 
@@ -85,6 +86,13 @@ def test_partial_publish_keeps_per_person_counts_and_continues_only_unfinished(d
     assert data["summary"]["counts"]["已完成"] == 2
     assert data["summary"]["counts"]["未完成"] == 3
     assert data["summary"]["rate"] == pytest.approx(0.4)
+    performance = performance_report(db, team["host"], date(2026, 11, 1), date(2026, 11, 30))
+    totals = {row["id"]: row["total"] for row in performance["groups"]}
+    for index, owner in enumerate(owners):
+        assert totals[owner]["items"] == 1
+        assert totals[owner]["completed"] == (1 if index < 2 else 0)
+        assert totals[owner]["incomplete"] == (0 if index < 2 else 1)
+    assert performance["summary"]["total"]["rate"] == pytest.approx(0.4)
     for selected in (first, current):
         followup = business.continue_meeting(db, team["host"], selected.id)
         assert len(followup.draft["items"]) == (1 if extend else 0)

@@ -162,7 +162,7 @@ test("部门角色只显示授权部门和下属员工，权限撤销后切回�
   page,
 }) => {
   const checks = await mock(page, "departments");
-  await page.goto("/reports");
+  await page.goto("/reports?view=regular");
   await expect.poll(() => checks.requests.length).toBe(1);
   const department = page.getByRole("combobox", {
     name: "筛选部门",
@@ -180,7 +180,7 @@ test("部门角色只显示授权部门和下属员工，权限撤销后切回�
     .poll(() => checks.requests.at(-1)?.get("department_id"))
     .toBe("it");
   const person = page.getByRole("combobox", { name: "筛选人员", exact: true });
-  await person.click();
+  await person.fill("员工");
   await expect(
     page.getByRole("option", { name: "开发员工", exact: true }),
   ).toBeVisible();
@@ -213,7 +213,7 @@ test("仅授权子组时不显示上级部门，权限读取失败不发报表�
   page,
 }) => {
   const checks = await mock(page, "departments", ["it-team"]);
-  await page.goto("/reports");
+  await page.goto("/reports?view=regular");
   await expect.poll(() => checks.requests.length).toBe(1);
   await page.getByRole("combobox", { name: "筛选部门", exact: true }).click();
   await expect(

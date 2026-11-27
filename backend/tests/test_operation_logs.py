@@ -315,3 +315,47 @@ def test_additive_migration_preserves_existing_records_and_blocks_destructive_do
         with pytest.raises(RuntimeError, match="不能删除"):
             migration.downgrade()
         assert connection.scalar(text("SELECT count(*) FROM audit_logs")) == 1
+
+
+def test_invalid_draft_shows_chinese_and_records_safe_context(logs_client, team, draft_factory):
+    client, root = logs_client
+    host = team["host"]
+    payload = draft_factory().model_dump(mode="json")
+    payload["title"] = ""
+    payload["items"][0]["content"] = "仅供校验的原始任务内容"
+    response = client.post("/api/meetings", json=payload, headers={
+        **headers(host), "X-Client-Page": "/meetings/new",
+    })
+    assert response.status_code == 422
+    assert response.json() == {"detail": "请填写会议名称后再保存草稿"}
+    result = client.get("/api/admin/operation-logs?view=errors&keyword=保存会议草稿", headers=headers(root))
+    assert result.status_code == 200
+    row, = result.json()["items"]
+    assert row["summary"] == response.json()["detail"]
+    assert row["actor_name"] == host.name
+    detail = client.get(f"/api/admin/operation-logs/{row['id']}", headers=headers(root))
+    assert detail.json()["context"]["http_status"] == 422
+    assert detail.json()["context"]["page"] == "/meetings/new"
+    assert "仅供校验的原始任务内容" not in result.text + detail.text
+
+
+def test_error_tab_includes_browser_failures_and_keeps_admin_permission(logs_client, team):
+    client, root = logs_client
+    host = team["host"]
+    response = client.post("/api/client-errors", json={
+        "code": "setup_title", "page": "/meetings/new",
+    }, headers=headers(host))
+    assert response.status_code == 204
+    attempt = client.get("/api/admin/operation-logs?view=errors", headers=headers(host))
+    assert attempt.status_code == 403
+    result = client.get("/api/admin/operation-logs?view=errors&keyword=新建会议", headers=headers(root))
+    row, = result.json()["items"]
+    assert row["actor_name"] == host.name
+    assert row["summary"] == "请填写会议名称"
+    detail = client.get(f"/api/admin/operation-logs/{row['id']}", headers=headers(root)).json()
+    assert detail["context"]["error_source"] == "浏览器"
+    assert not detail["context"].get("query")
+    assert client.post("/api/client-errors", json={
+        "code": "setup_title", "page": "/meetings/new?token=not-allowed",
+    }, headers=headers(host)).status_code == 422
+    assert client.get("/api/does-not-exist", headers=headers(host)).json()["detail"] == "找不到该功能或记录，请刷新后重试"

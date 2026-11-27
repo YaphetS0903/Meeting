@@ -14,10 +14,12 @@ test("真实接口：系列内新建、手机编辑、预览发布、待办申�
     .click();
   await page.getByRole("button", { name: "＋ 新建会议", exact: true }).click();
   await page
-    .locator(".meeting-info-card")
-    .getByRole("button", { name: "编辑", exact: true })
+    .getByRole("dialog", { name: "新建会议", exact: true })
+    .getByRole("textbox", { name: "会议名称", exact: true })
+    .fill("真实闭环验收会议");
+  await page
+    .getByRole("button", { name: "确认并填写任务单", exact: true })
     .click();
-  await page.getByLabel("会议名称", { exact: true }).fill("真实闭环验收会议");
   await page.getByRole("button", { name: "＋ 新增工作", exact: true }).click();
   const row = page.locator(".meeting-plan-table tbody tr").first();
   await row

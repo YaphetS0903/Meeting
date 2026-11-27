@@ -100,6 +100,13 @@ test("首次保存期间的新输入保留并自动继续保存，失败时仍�
   });
   await page.goto("/meetings/new?series=series:isolated-series");
   await page
+    .getByRole("dialog", { name: "新建会议", exact: true })
+    .getByRole("textbox", { name: "会议名称", exact: true })
+    .fill("测试会议");
+  await page
+    .getByRole("button", { name: "确认并填写任务单", exact: true })
+    .click();
+  await page
     .locator(".meeting-info-card")
     .getByRole("button", { name: "编辑", exact: true })
     .click();

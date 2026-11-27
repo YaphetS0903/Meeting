@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { chineseError, reportClientError } from "../errorMessages";
+import NewMeetingSetup from "../components/NewMeetingSetup.vue";
 import {
   ref,
   computed,
@@ -57,6 +59,7 @@ import MeetingNativeTodos from "../components/MeetingNativeTodos.vue";
 import OwnerResultsDialog from "../components/OwnerResultsDialog.vue";
 import { mergedWorkContent, updateWorkContent } from "../workContent";
 const meetingDepartments = ref<any[] | null>(null);
+const newMeetingSetupOpen = ref(false);
 const departmentOptions = computed(
   () => meetingDepartments.value ?? state.directory.departments,
 );
@@ -552,8 +555,10 @@ async function refreshPreview() {
     previewUrl.value = URL.createObjectURL(blob);
   } catch (error: any) {
     if (generation === pageGeneration && request === previewRequest)
-      previewError.value =
-        error.message || "预览生成失败，请检查会议信息和任务后重试";
+      previewError.value = chineseError(
+        error,
+        "预览生成失败，请检查会议信息和任务后重试",
+      );
   } finally {
     if (generation === pageGeneration && request === previewRequest)
       previewLoading.value = false;
@@ -632,7 +637,7 @@ async function loadSheetSource() {
     if (generation === sheetSourceGeneration) sheetSource.value = source;
   } catch (error: any) {
     if (generation === sheetSourceGeneration)
-      sheetSourceError.value = error.message;
+      sheetSourceError.value = chineseError(error);
   } finally {
     if (generation === sheetSourceGeneration) sheetSourceLoading.value = false;
   }
@@ -1057,6 +1062,7 @@ async function load(background = false) {
   loading.value = true;
   selectedVersion.value = null;
   basicInfoEditing.value = false;
+  newMeetingSetupOpen.value = routeId === "new";
   participantsExpanded.value = false;
   participantDialogVisible.value = false;
   try {
@@ -1072,7 +1078,10 @@ async function load(background = false) {
         (s: any) => s.id === initialSeriesId,
       );
       const initialKind =
-        initialSeries?.kind === "special" ? "special" : "department";
+        initialSeries?.kind === "special" ||
+        (!initialSeries && !state.me.department_id)
+          ? "special"
+          : "department";
       draft.value = {
         title: "",
         department_id:
@@ -1159,6 +1168,7 @@ watch(
   () => {
     if (loading.value || !editable.value || selectedVersion.value) return;
     dirty.value = true;
+    saveError.value = "";
     cancelAutosave();
     if (meeting.value && editable.value) scheduleAutosave();
   },
@@ -1178,12 +1188,32 @@ async function save(manual = true) {
   if (
     generation !== pageGeneration ||
     cancellingRevision.value ||
+    newMeetingSetupOpen.value ||
     loading.value ||
     !draft.value ||
     !editable.value ||
     selectedVersion.value
   )
     return false;
+  if (!draft.value.title?.trim()) {
+    saveError.value = "请填写会议名称后再保存草稿";
+    if (manual) {
+      reportClientError(
+        "title_required",
+        meeting.value?.id ? `/meetings/${meeting.value.id}` : "/meetings",
+        meeting.value?.id ? "PUT" : "POST",
+      );
+      basicInfoEditing.value = true;
+      ElMessage.error(saveError.value);
+      await nextTick();
+      const input = document.querySelector<HTMLInputElement>(
+        ".meeting-info-card input[aria-label='会议名称']",
+      );
+      input?.focus();
+      input?.scrollIntoView({ block: "center" });
+    }
+    return false;
+  }
   for (const item of draft.value.items) {
     if (item.section === "new" && !item.task_id && !item.historical_work_id)
       item.historical_owner_record = canRecordHistoricalOwners(item);
@@ -1254,8 +1284,8 @@ async function persistDraft(manual: boolean, generation: number) {
     return true;
   } catch (e: any) {
     if (generation === pageGeneration) {
-      saveError.value = e.message;
-      if (manual) ElMessage.error("草稿保存失败：" + e.message);
+      saveError.value = chineseError(e);
+      if (manual) ElMessage.error("草稿保存失败：" + chineseError(e));
     }
     return false;
   } finally {
@@ -1403,7 +1433,7 @@ async function carry() {
       draft.value.series_id === requestedSeries
     ) {
       carryError.value = true;
-      carryMessage.value = `上期任务加载失败：${error.message}。请重试带入。`;
+      carryMessage.value = `上期任务加载失败：${chineseError(error)}。请重试带入。`;
     }
     throw error;
   } finally {
@@ -1421,8 +1451,13 @@ async function newSeries() {
     kind: draft.value.kind,
     department_id: draft.value.department_id,
   });
-  if (!state.directory.series.some((item: any) => item.id === s.id))
-    state.directory.series.push(s);
+  const known = state.directory.series.find((item: any) => item.id === s.id);
+  if (known) Object.assign(known, s);
+  else state.directory.series.push(s);
+  if (s.can_start_meeting === false)
+    throw new Error(
+      "请从系列内已发布的会议申请接续权限，或联系系列创建人建立首场会议",
+    );
   draft.value.series_id = s.id;
   meetingSeriesChanged(s.id);
 }
@@ -1452,16 +1487,16 @@ async function moveArchiveSeries() {
     archiveSeriesSaving.value = false;
   }
 }
-async function requestEdit() {
+async function requestEdit(forContinuation = false) {
   if (
     !meeting.value ||
-    meeting.value.can_edit ||
+    (meeting.value.can_edit && !meeting.value.can_request_continue) ||
     meeting.value.my_edit_request?.state === "pending"
   )
     return;
   await ElMessageBox.confirm(
     "确定向会议主持人申请此会议的编辑与持续新建权限吗？主持人审批通过后才可操作。",
-    "申请编辑会议",
+    forContinuation ? "申请接续权限" : "申请编辑会议",
     { type: "info", confirmButtonText: "确定申请" },
   );
   await api(`/meetings/${meeting.value.id}/edit-requests`, "POST");
@@ -1677,7 +1712,7 @@ async function publish() {
     } catch (e: any) {
       if (pageGeneration === refreshGeneration)
         ElMessage.warning(
-          `会议已发布；详情暂未刷新，请稍后刷新核对。企微待办可从“派发企微待办”继续：${e.message}`,
+          `会议已发布；详情暂未刷新，请稍后刷新核对。企微待办可从“派发企微待办”继续：${chineseError(e)}`,
         );
     }
   } finally {
@@ -1741,7 +1776,7 @@ async function cancelRevision() {
     }
   } catch (error: any) {
     if (error !== "cancel" && error !== "close")
-      saveError.value = error.message || "取消修订失败，请刷新核对后重试";
+      saveError.value = chineseError(error, "取消修订失败，请刷新核对后重试");
     throw error;
   } finally {
     cancellingRevision.value = false;
@@ -1759,6 +1794,16 @@ async function ensureEditableDraft() {
     else await revise();
   }
   return editable.value && !selectedVersion.value;
+}
+function confirmNewMeetingSetup() {
+  newMeetingSetupOpen.value = false;
+}
+async function cancelNewMeetingSetup() {
+  dirty.value = false;
+  await router.replace({
+    path: "/meetings",
+    query: archiveSeriesKey.value ? { series: archiveSeriesKey.value } : {},
+  });
 }
 async function editCard() {
   if (await ensureEditableDraft()) basicInfoEditing.value = true;
@@ -2014,6 +2059,17 @@ onBeforeRouteUpdate((to, from) => {
 </script>
 <template>
   <div v-loading="loading || cancellingRevision">
+    <NewMeetingSetup
+      v-if="newMeetingSetupOpen && draft && !loading"
+      :draft="draft"
+      :users="meetingUsers"
+      :departments="departmentOptions"
+      :series-name="archiveSeriesName"
+      :series-locked="seriesKindLocked"
+      @confirm="confirmNewMeetingSetup"
+      @cancel="run(cancelNewMeetingSetup)"
+      @kind-change="meetingKindChanged"
+    />
     <section class="page-heading">
       <div>
         <h1>{{ editable ? "在线会议编辑" : "会议纪要" }}</h1>
@@ -2061,7 +2117,15 @@ onBeforeRouteUpdate((to, from) => {
             @click="run(revise)"
             >创建修订版本</el-button
           ><el-button
-            v-else-if="meeting && meeting.my_edit_request?.state !== 'pending'"
+            v-else-if="
+              meeting &&
+              !meeting.can_edit &&
+              meeting.my_edit_request?.state !== 'pending' &&
+              !(
+                meeting.can_request_continue &&
+                route.query.request === 'continue'
+              )
+            "
             type="primary"
             @click="run(requestEdit)"
             >申请编辑会议</el-button
@@ -2101,6 +2165,23 @@ onBeforeRouteUpdate((to, from) => {
           >{{
             allowedMeeting("publish") ? "预览并发布" : "预览任务单"
           }}</el-button
+        ><el-button
+          v-if="
+            meeting?.can_request_continue &&
+            (meeting.can_edit || route.query.request === 'continue') &&
+            meeting.my_edit_request?.state !== 'pending'
+          "
+          type="primary"
+          @click="run(() => requestEdit(true))"
+          >申请接续权限</el-button
+        ><el-tag
+          v-if="
+            meeting?.can_request_continue &&
+            meeting.can_edit &&
+            meeting.my_edit_request?.state === 'pending'
+          "
+          type="warning"
+          >接续申请待主持人审批</el-tag
         ><el-button
           v-if="meeting?.can_continue"
           class="meeting-continue-action"
@@ -2490,6 +2571,10 @@ onBeforeRouteUpdate((to, from) => {
                     :key="s.id"
                     :label="s.name"
                     :value="s.id"
+                    :disabled="
+                      s.can_start_meeting === false &&
+                      s.id !== meeting?.series_id
+                    "
                   />
                 </el-select>
                 <el-button
@@ -3301,7 +3386,13 @@ onBeforeRouteUpdate((to, from) => {
               ><template #default="{ row }">{{
                 beijingTime(row.sent_at)
               }}</template></el-table-column
-            ><el-table-column prop="last_error" label="原因" min-width="220" />
+            ><el-table-column label="原因" min-width="220">
+              <template #default="{ row }">{{
+                row.last_error
+                  ? chineseError(row.last_error, "处理失败，请查看操作日志")
+                  : "—"
+              }}</template>
+            </el-table-column>
           </el-table>
         </el-collapse-item>
       </el-collapse>
@@ -3337,7 +3428,13 @@ onBeforeRouteUpdate((to, from) => {
             beijingTime(row.sent_at)
           }}</template></el-table-column
         >
-        <el-table-column prop="last_error" label="失败原因" min-width="220" />
+        <el-table-column label="失败原因" min-width="220">
+          <template #default="{ row }">{{
+            row.last_error
+              ? chineseError(row.last_error, "处理失败，请查看操作日志")
+              : "—"
+          }}</template>
+        </el-table-column>
       </el-table>
     </section>
     <section

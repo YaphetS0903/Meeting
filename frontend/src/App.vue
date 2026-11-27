@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { chineseError } from "./errorMessages";
 import { computed, ref, onMounted, onUnmounted, watch } from "vue";
 import { ElMessage } from "element-plus";
 import { useRoute, useRouter } from "vue-router";
@@ -101,7 +102,7 @@ async function wecomLogin(mode: "oauth" | "qr" = "oauth") {
     window.location.assign(r.url);
     return true;
   } catch (error: any) {
-    loginError.value = error.message || "企业微信登录暂时不可用，请重试";
+    loginError.value = chineseError(error, "企业微信登录暂时不可用，请重试");
     return false;
   } finally {
     busy.value = false;
@@ -224,7 +225,7 @@ onMounted(async () => {
     } catch (error: any) {
       state.me = null;
       sessionStorage.removeItem("token");
-      loginError.value = error.message || "企业微信登录失败，请重试";
+      loginError.value = chineseError(error, "企业微信登录失败，请重试");
       const query = { ...router.currentRoute.value.query };
       delete query.code;
       delete query.state;
@@ -234,7 +235,7 @@ onMounted(async () => {
     try {
       await loadSession();
     } catch (error: any) {
-      loginError.value = error.message || "登录状态加载失败，请重试";
+      loginError.value = chineseError(error, "登录状态加载失败，请重试");
     }
   }
   const options = await api("/auth/options").catch(() => ({
@@ -270,7 +271,7 @@ async function login() {
     sessionStorage.removeItem(logoutKey);
     password.value = "";
   } catch (e: any) {
-    loginError.value = e.message;
+    loginError.value = chineseError(e);
   } finally {
     busy.value = false;
   }
@@ -302,7 +303,7 @@ async function changePassword() {
     clearPasswordForm();
     ElMessage.success("密码已修改，其他设备需要重新登录");
   } catch (error: any) {
-    passwordError.value = error.message || "修改密码失败";
+    passwordError.value = chineseError(error, "修改密码失败");
   } finally {
     changingPassword.value = false;
   }

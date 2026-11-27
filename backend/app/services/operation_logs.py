@@ -5,8 +5,10 @@ import re
 from contextvars import ContextVar
 from datetime import timezone
 
+from fastapi.exceptions import RequestValidationError
 from sqlalchemy import select
 
+from app.error_messages import error_message
 from app.models import (
     Attachment,
     AuditLog,
@@ -326,7 +328,7 @@ def finish_request(db, error=None):
     if error is None and context.get("business_logged"):
         return
     path, method = context["path"], context["method"]
-    if method in {"OPTIONS", "HEAD"} or (error is None and passive_read(context)):
+    if path == "/api/client-errors" or method in {"OPTIONS", "HEAD"} or (error is None and passive_read(context)):
         return
     scope = context["scope"]
     identifier = scope.get("path_params", {}).get("identifier")
@@ -363,8 +365,18 @@ def finish_request(db, error=None):
         )
     )
     label = verb + names.get(resource, "系统功能")
-    if path.endswith("/preview"):
+    if (path == "/api/meetings" and method == "POST") or (resource == "meetings" and method == "PUT"):
+        label = "保存会议草稿"
+    elif path.endswith("/preview"):
         label = "预览会议任务单"
+    elif path.endswith("/publish") and resource == "meetings":
+        label = "发布会议任务单"
+    elif path.endswith("/continue") and resource == "meetings":
+        label = "接续新建会议"
+    elif resource == "meeting-sheet-imports" and method == "POST":
+        label = "导入会议任务单"
+    elif resource == "direct-assignments" and method == "POST":
+        label = "直接派发任务"
     elif "/operation-logs" in path or path == "/api/admin/audit":
         label = "查看操作日志"
     filters = {
@@ -388,7 +400,15 @@ def finish_request(db, error=None):
         result="failed" if error else "success",
         http_status=getattr(error, "status_code", 500) if error else 200,
     )
-    detail = getattr(error, "detail", "服务器处理失败") if error else ""
+    detail = error_message(error, path) if error else ""
+    if error:
+        values["http_status"] = 422 if isinstance(error, RequestValidationError) else getattr(error, "status_code", 500)
+        values["error_source"] = "服务端"
+        values["route"] = getattr(scope.get("route"), "path", "")
+        page = dict(scope.get("headers", [])).get(b"x-client-page", b"").decode("ascii", "ignore")
+        if re.fullmatch(r"/[a-zA-Z0-9/_-]{0,180}", page):
+            values["page"] = page
+        values["query"] = {k: v for k, v in values["query"].items() if k not in {"q", "keyword", "content"}}
     db.add(
         AuditLog(
             actor_id=actor["id"],
@@ -692,7 +712,7 @@ def present(db, entry, detail=False):
         "target": target,
         "category": context.get("category") or category_for(entry.action),
         "result": result,
-        "summary": entry.reason
+        "summary": sanitize(entry.reason)
         or (
             (
                 f"已发布；通知 {len(context['notification_plan'])} 个渠道"

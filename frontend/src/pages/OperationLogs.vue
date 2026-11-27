@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { chineseError } from "../errorMessages";
 import { computed, ref, watch } from "vue";
 import { Refresh, Search } from "@element-plus/icons-vue";
 import { ElMessage } from "element-plus";
@@ -6,6 +7,7 @@ import { api, query, state } from "../api";
 import { beijingTime } from "../time";
 
 const allowed = computed(() => !!state.me?.can_view_operation_logs);
+const view = ref<"operations" | "errors">("operations");
 const keyword = ref("");
 const dates = ref<string[]>([]);
 const category = ref("");
@@ -38,6 +40,7 @@ async function load() {
       "/admin/operation-logs?" +
         query({
           ...applied.value,
+          ...(view.value === "errors" ? { view: "errors" } : {}),
           page: page.value,
           page_size: pageSize.value,
         }),
@@ -48,7 +51,7 @@ async function load() {
     categories.value = data.categories;
   } catch (e: any) {
     if (current === generation)
-      error.value = e.message || "加载日志失败，请重试";
+      error.value = chineseError(e, "加载日志失败，请重试");
   } finally {
     if (current === generation) loading.value = false;
   }
@@ -67,6 +70,12 @@ async function search() {
   };
   page.value = 1;
   await load();
+}
+async function changeView(value: "operations" | "errors") {
+  if (value === view.value) return;
+  view.value = value;
+  result.value = "";
+  await search();
 }
 async function reset() {
   keyword.value = category.value = result.value = "";
@@ -92,7 +101,7 @@ async function openDetail(row: any) {
       detail.value = value;
   } catch (e: any) {
     if (current === detailGeneration)
-      detailError.value = e.message || "加载详情失败，请重试";
+      detailError.value = chineseError(e, "加载详情失败，请重试");
   } finally {
     if (current === detailGeneration) detailLoading.value = false;
   }
@@ -156,7 +165,21 @@ const channelLabels: Record<string, string> = {
         >刷新</el-button
       >
     </section>
-    <section class="panel operation-logs-panel" aria-label="操作日志记录">
+    <el-radio-group
+      :model-value="view"
+      aria-label="日志类型"
+      class="operation-log-view"
+      @change="
+        (value) => changeView(value === 'errors' ? 'errors' : 'operations')
+      "
+    >
+      <el-radio-button value="operations">操作记录</el-radio-button>
+      <el-radio-button value="errors">系统错误日志</el-radio-button>
+    </el-radio-group>
+    <section
+      class="panel operation-logs-panel"
+      :aria-label="view === 'errors' ? '系统错误日志' : '操作日志记录'"
+    >
       <el-form
         class="operation-log-filters"
         label-position="top"
@@ -184,7 +207,7 @@ const channelLabels: Record<string, string> = {
               :label="label"
               :value="value" /></el-select
         ></el-form-item>
-        <el-form-item label="操作结果"
+        <el-form-item v-if="view === 'operations'" label="操作结果"
           ><el-select
             v-model="result"
             clearable
@@ -202,7 +225,11 @@ const channelLabels: Record<string, string> = {
             clearable
             maxlength="120"
             aria-label="日志关键词"
-            placeholder="操作人、会议、任务或操作内容"
+            :placeholder="
+              view === 'errors'
+                ? '操作人、功能或错误提示'
+                : '操作人、会议、任务或操作内容'
+            "
         /></el-form-item>
         <div class="operation-log-filter-actions">
           <el-button
@@ -223,7 +250,15 @@ const channelLabels: Record<string, string> = {
         role="alert"
       />
       <div v-loading="loading" class="operation-log-table" :aria-busy="loading">
-        <el-table :data="rows" empty-text="暂无符合条件的操作记录" row-key="id">
+        <el-table
+          :data="rows"
+          :empty-text="
+            view === 'errors'
+              ? '暂无符合条件的错误记录'
+              : '暂无符合条件的操作记录'
+          "
+          row-key="id"
+        >
           <el-table-column label="操作时间（北京时间）" min-width="175"
             ><template #default="{ row }">{{
               beijingTime(row.created_at)
@@ -246,9 +281,15 @@ const channelLabels: Record<string, string> = {
             min-width="220"
             show-overflow-tooltip
           />
-          <el-table-column label="说明" min-width="260"
+          <el-table-column
+            :label="view === 'errors' ? '错误提示' : '说明'"
+            min-width="260"
             ><template #default="{ row }">
-              <span>{{ row.summary }}</span>
+              <span>{{
+                view === "errors"
+                  ? chineseError(row.summary, "系统处理失败，请核对该操作")
+                  : row.summary
+              }}</span>
               <span v-if="row.sent_at" class="operation-log-secondary"
                 >邮件发送：{{ beijingTime(row.sent_at) }}</span
               >
@@ -293,7 +334,7 @@ const channelLabels: Record<string, string> = {
     </section>
     <el-dialog
       v-model="detailVisible"
-      title="操作详情"
+      :title="view === 'errors' ? '错误详情' : '操作详情'"
       width="min(960px, 94vw)"
       class="operation-log-dialog"
       destroy-on-close
@@ -330,10 +371,41 @@ const channelLabels: Record<string, string> = {
               ><el-tag :type="resultType(detail.result)">{{
                 resultLabels[detail.result] || detail.result
               }}</el-tag></el-descriptions-item
-            ><el-descriptions-item v-if="detail.summary" label="说明">{{
-              detail.summary
-            }}</el-descriptions-item></el-descriptions
+            ><el-descriptions-item
+              v-if="detail.summary"
+              :label="view === 'errors' ? '错误提示' : '说明'"
+              >{{
+                view === "errors"
+                  ? chineseError(detail.summary, "系统处理失败，请核对该操作")
+                  : detail.summary
+              }}</el-descriptions-item
+            ></el-descriptions
           >
+          <section
+            v-if="view === 'errors' && detail.context.error_source"
+            class="operation-log-section"
+          >
+            <h2>排查信息</h2>
+            <el-descriptions :column="1" border>
+              <el-descriptions-item label="来源">{{
+                detail.context.error_source
+              }}</el-descriptions-item>
+              <el-descriptions-item
+                v-if="detail.context.page"
+                label="发生页面"
+                >{{ detail.context.page }}</el-descriptions-item
+              >
+              <el-descriptions-item v-if="detail.context.path" label="请求路径"
+                >{{ detail.context.method }}
+                {{ detail.context.path }}</el-descriptions-item
+              >
+              <el-descriptions-item
+                v-if="detail.context.http_status"
+                label="响应状态码"
+                >{{ detail.context.http_status }}</el-descriptions-item
+              >
+            </el-descriptions>
+          </section>
           <section v-if="detail.meeting_record" class="operation-log-section">
             <h2>会议创建信息</h2>
             <el-descriptions :column="1" border>
@@ -400,7 +472,14 @@ const channelLabels: Record<string, string> = {
                 </dd>
                 <template v-if="delivery.error"
                   ><dt>发送说明</dt>
-                  <dd>{{ delivery.error }}</dd></template
+                  <dd>
+                    {{
+                      chineseError(
+                        delivery.error,
+                        "发送失败，请核对渠道配置和状态",
+                      )
+                    }}
+                  </dd></template
                 >
               </dl>
               <details
@@ -423,7 +502,14 @@ const channelLabels: Record<string, string> = {
                   <p v-if="attempt.actual_cc?.length">
                     实际抄送邮箱：{{ attempt.actual_cc.join("；") }}
                   </p>
-                  <p v-if="attempt.error">{{ attempt.error }}</p>
+                  <p v-if="attempt.error">
+                    {{
+                      chineseError(
+                        attempt.error,
+                        "发送失败，请核对渠道配置和状态",
+                      )
+                    }}
+                  </p>
                 </div>
               </details>
               <p v-if="delivery.historical" class="muted small">
@@ -474,6 +560,10 @@ const channelLabels: Record<string, string> = {
 </template>
 
 <style scoped>
+.operation-log-view {
+  margin-bottom: 12px;
+}
+
 .operation-logs-page {
   max-width: 1600px;
   margin: 0 auto;

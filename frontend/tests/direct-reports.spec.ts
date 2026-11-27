@@ -106,14 +106,7 @@ async function fixture(page: Page, admin = true, exportAllowed = true) {
     }
     return route.fulfill({ json: body });
   });
-  await page.goto("/reports");
-  await expect(
-    page.getByRole("radio", { name: "会议纪要统计", exact: true }),
-  ).toBeVisible();
-  await page
-    .locator(".el-radio-button")
-    .filter({ hasText: "直接派发任务统计" })
-    .click();
+  await page.goto("/reports?view=direct");
   await expect(
     page.getByRole("heading", {
       name: admin ? "人员派发任务统计" : "我的派发任务统计",

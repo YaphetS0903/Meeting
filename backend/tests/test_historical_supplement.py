@@ -132,7 +132,7 @@ def test_target_permission_required_even_when_source_publish_is_allowed(db, team
     draft = history_draft(team)
     draft.host_id = actor.id
     grant(db, actor, [rule("meetings", ["create"], "self")])
-    source = create_meeting(db, actor, draft)
+    source = create_meeting(db, team["host"], draft)
     original = deepcopy(target.draft), target.draft_version
     release(db, actor, source)
     assert (target.draft, target.draft_version) == original and not target.has_draft

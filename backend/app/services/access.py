@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.models import (
     Assessment,
+    AuditLog,
     Department,
     Meeting,
     MeetingAttendee,
@@ -14,7 +15,7 @@ from app.models import (
     TaskOwner,
     User,
 )
-from app.services.role_permissions import approved_meeting_filter, meeting_allowed, permission_scope
+from app.services.role_permissions import allows, approved_meeting_filter, meeting_allowed, permission_scope
 
 
 def department_ids(db: Session, user: User) -> list[str]:
@@ -203,7 +204,33 @@ def visible_series(db, user):
         return query
     departments = set(department_ids(db, user)) | meeting_department_scope(db, user) | scope.departments
     related = visible_meetings(db, user).with_only_columns(Meeting.series_id)
-    return query.where(or_(MeetingSeries.department_id.in_(departments), MeetingSeries.id.in_(related)))
+    created = select(AuditLog.entity_id).where(
+        AuditLog.action == "meeting_series.create", AuditLog.actor_id == user.id
+    )
+    return query.where(or_(
+        MeetingSeries.department_id.in_(departments), MeetingSeries.id.in_(related), MeetingSeries.id.in_(created),
+    ))
+
+
+def startable_series_ids(db, user, series_rows):
+    """Only the creator can start an empty series, except for legacy series without a creator."""
+    if not user.active:
+        return set()
+    identifiers = {series.id for series in series_rows}
+    if user.is_admin or not identifiers:
+        return identifiers
+    used = set(db.scalars(select(Meeting.series_id).where(Meeting.series_id.in_(identifiers)).distinct()))
+    creators = dict(db.execute(select(AuditLog.entity_id, AuditLog.actor_id).where(
+        AuditLog.entity_id.in_(identifiers - used), AuditLog.action == "meeting_series.create",
+    )).all())
+    departments = set(department_ids(db, user))
+    return {
+        series.id for series in series_rows if series.id not in used and (
+            creators.get(series.id) == user.id if series.id in creators else (
+                series.department_id in departments or allows(db, user, "meetings.create", series.department_id)
+            )
+        )
+    }
 
 
 def visible_tasks(db, user):

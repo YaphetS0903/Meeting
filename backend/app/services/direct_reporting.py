@@ -75,10 +75,11 @@ def metrics(row):
 def direct_report(
     db, actor, start: date, end: date, department_id=None, person_id=None, status=None,
     *, include_details=False, details_only=False, offset=0, limit=20, all_details=False,
+    performance_details=False,
 ):
     if start > end:
         raise HTTPException(422, "开始日期不能晚于结束日期")
-    if status and status not in STATUSES:
+    if status and not performance_details and status not in STATUSES:
         raise HTTPException(422, "无效的直接派发任务统计状态")
     scoped = scoped_rows(db, actor, department_id, person_id)
     rows = scoped.where(Task.due_date.between(start, end)).subquery()
@@ -97,9 +98,17 @@ def direct_report(
             undated_count=db.scalar(select(func.count(distinct(undated.c.task_id)))),
         )
     if include_details or details_only or all_details:
+        detail_status = rows.c.status
+        if performance_details:
+            # Match the due_items and due_completed counts used by the performance report.
+            detail_status = case(
+                (rows.c.due_date > today(), "未到期"),
+                (rows.c.status == "已完成", "已完成"),
+                else_="未完成",
+            )
         identifiers = select(rows.c.task_id).distinct()
         if status:
-            identifiers = identifiers.where(rows.c.status == status)
+            identifiers = identifiers.where(detail_status == status)
         result["details_total"] = db.scalar(select(func.count()).select_from(identifiers.subquery()))
         issuer = aliased(User)
         query = (
@@ -113,9 +122,10 @@ def direct_report(
         tasks = list(db.execute(query))
         task_ids = [task.id for task, _ in tasks]
         owners, states, histories = {}, {}, {}
-        for row in db.execute(select(rows).where(rows.c.task_id.in_(task_ids))).mappings():
+        owner_rows = select(rows, detail_status.label("detail_status")).where(rows.c.task_id.in_(task_ids))
+        for row in db.execute(owner_rows).mappings():
             owners.setdefault(row["task_id"], {})[row["user_id"]] = row["user_name"]
-            states[row["task_id"]] = row["status"]
+            states[row["task_id"]] = row["detail_status"]
         for version in db.scalars(select(TaskVersion).where(TaskVersion.task_id.in_(task_ids)).order_by(TaskVersion.number)):
             value = version.snapshot.get("due_date")
             dates = histories.setdefault(version.task_id, [])

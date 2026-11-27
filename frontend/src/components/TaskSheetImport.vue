@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { chineseError } from "../errorMessages";
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { Upload } from "@element-plus/icons-vue";
 import { ElMessage } from "element-plus";
@@ -79,7 +80,9 @@ function receive(value: any, current: number) {
   source.value = value;
   resumableId.value = value.id;
   sessionStorage.setItem(storageKey(), value.id);
-  error.value = value.error || "";
+  error.value = value.error
+    ? chineseError(value.error, "无法识别任务单，请检查原文件后重试")
+    : "";
   busy.value = ["pending", "processing"].includes(value.status);
   if (busy.value) {
     pollTimer = setTimeout(() => refreshSource(value.id, current), 2000);
@@ -96,7 +99,7 @@ async function refreshSource(id: string, current = generation) {
   } catch (e: any) {
     if (current !== generation) return;
     busy.value = false;
-    error.value = `${e.message}；可点击“更新识别状态”，或重新选择文件。`;
+    error.value = `${chineseError(e)}；可点击“更新识别状态”，或重新选择文件。`;
   }
 }
 function updateStatus() {
@@ -114,7 +117,7 @@ async function retryRecognition() {
     );
   } catch (e: any) {
     if (current === generation) {
-      error.value = e.message;
+      error.value = chineseError(e);
       busy.value = false;
     }
   }
@@ -178,7 +181,7 @@ async function recognize(event: Event) {
     sessionStorage.setItem(key, value.id);
     receive(value, current);
   } catch (e: any) {
-    if (current === generation) error.value = e.message;
+    if (current === generation) error.value = chineseError(e);
   } finally {
     uploading.value = false;
     if (
@@ -208,7 +211,7 @@ async function create() {
     sessionStorage.removeItem(storageKey());
     emit("created", result.id);
   } catch (e: any) {
-    error.value = e.message;
+    error.value = chineseError(e);
   } finally {
     creating.value = false;
   }

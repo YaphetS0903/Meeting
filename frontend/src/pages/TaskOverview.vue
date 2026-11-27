@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { chineseError } from "../errorMessages";
 import { computed, onMounted, ref } from "vue";
 import { useRoute } from "vue-router";
 import { api, departmentPath, query, run, state, statuses } from "../api";
@@ -91,7 +92,7 @@ async function load() {
     options.value = scope;
     data.value = result;
   } catch (e: any) {
-    if (active === generation) error.value = e.message || "服务暂时不可用";
+    if (active === generation) error.value = chineseError(e, "服务暂时不可用");
     throw e;
   } finally {
     if (active === generation) loading.value = false;

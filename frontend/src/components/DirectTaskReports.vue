@@ -1,11 +1,22 @@
 <script setup lang="ts">
+import { chineseError } from "../errorMessages";
 import { computed, onBeforeUnmount, ref, watch } from "vue";
-import { api, download, query, rate, run, state } from "../api";
+import {
+  api,
+  download,
+  query,
+  rate,
+  isLowReportRate,
+  run,
+  state,
+} from "../api";
 import {
   reportDepartmentOptions,
   authorizedReportDepartments,
   reportDepartmentScope,
 } from "../reportDepartments";
+import ReportRateMeter from "./ReportRateMeter.vue";
+import ReportOverview from "./ReportOverview.vue";
 import PeriodFilter from "./PeriodFilter.vue";
 import PeopleSelect from "./PeopleSelect.vue";
 import StatusTag from "./StatusTag.vue";
@@ -81,7 +92,7 @@ async function load() {
     data.value = result;
     loaded.value = requested;
   } catch (e: any) {
-    if (ticket === generation) error.value = e.message || "报表加载失败";
+    if (ticket === generation) error.value = chineseError(e, "报表加载失败");
   } finally {
     if (ticket === generation) busy.value = false;
   }
@@ -117,7 +128,7 @@ async function loadDetails() {
     detailTotal.value = result.details_total;
   } catch (e: any) {
     if (ticket === detailGeneration)
-      detailError.value = e.message || "明细加载失败";
+      detailError.value = chineseError(e, "明细加载失败");
   } finally {
     if (ticket === detailGeneration) detailBusy.value = false;
   }
@@ -202,35 +213,15 @@ onBeforeUnmount(() => {
     <p v-if="data.undated_count" class="muted">
       {{ data.undated_count }} 项任务未设计划完成日期，未计入本期。
     </p>
-    <div class="stat-grid direct-summary">
-      <article class="stat">
-        <span>到期完成率</span><strong>{{ rate(data.summary.rate) }}</strong
-        ><small
-          >到期验证通过 {{ data.summary.due_completed }} / 已到期
-          {{ data.summary.due_items }}</small
-        >
-      </article>
-      <article class="stat">
-        <span>任务总数</span
-        ><el-button
-          link
-          type="primary"
-          aria-label="查看全部派发任务"
-          @click="showDetails()"
-          ><strong>{{ data.summary.items }}</strong></el-button
-        ><small>按任务去重</small>
-      </article>
-      <article v-for="s in statuses" :key="s" class="stat">
-        <span>{{ s }}</span
-        ><el-button
-          link
-          type="primary"
-          :aria-label="`查看${s}派发任务`"
-          @click="showDetails(s)"
-          ><strong>{{ data.summary.counts[s] }}</strong></el-button
-        >
-      </article>
-    </div>
+    <ReportOverview
+      :summary="data.summary"
+      :statuses="statuses"
+      rate-label="到期完成率"
+      total-label="任务总数"
+      task-label="派发任务"
+      :rate-hint="`到期验证通过 ${data.summary.due_completed} / 已到期 ${data.summary.due_items}`"
+      @details="showDetails($event)"
+    />
     <section class="panel direct-results">
       <div class="panel-heading">
         <h2>{{ canViewOthers ? "人员派发任务统计" : "我的派发任务统计" }}</h2>
@@ -276,11 +267,10 @@ onBeforeUnmount(() => {
             ></template
           ></el-table-column
         >
-        <el-table-column label="到期完成率" min-width="115" align="right"
-          ><template #default="{ row }">{{
-            rate(row.rate)
-          }}</template></el-table-column
-        >
+        <el-table-column label="到期完成率" min-width="160" align="right"
+          ><template #default="{ row }">
+            <ReportRateMeter :value="row.rate" /> </template
+        ></el-table-column>
       </el-table>
       <p class="direct-rule">
         到期完成率 = 已到期且验证通过 ÷ 已到期有效任务；撤回任务不计入。

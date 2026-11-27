@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { chineseError } from "../errorMessages";
 import { onBeforeUnmount, ref, watch } from "vue";
 import { api } from "../api";
 
@@ -25,7 +26,7 @@ async function search() {
     if (current === generation && visible.value) options.value = result.items;
   } catch (e: any) {
     if (current === generation)
-      error.value = e.message || "读取失败，请重新查询";
+      error.value = chineseError(e, "读取失败，请重新查询");
   } finally {
     if (current === generation) loading.value = false;
   }

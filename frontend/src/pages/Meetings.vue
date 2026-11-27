@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { chineseError } from "../errorMessages";
 import { hasBusinessPermission } from "../api";
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
@@ -65,6 +66,22 @@ function importedMeeting(id: string) {
 const activeSeries = computed(() =>
   typeof route.query.series === "string" ? route.query.series : "",
 );
+const seriesStartAllowedKey = ref("");
+const canCreateMeeting = computed(
+  () =>
+    !!activeSeries.value && seriesStartAllowedKey.value === activeSeries.value,
+);
+const creationDepartments = computed(() => {
+  const me = state.directory.users.find(
+    (entry: any) => entry.id === state.me?.id,
+  );
+  return state.directory.departments.filter(
+    (d: any) =>
+      d.id === state.me?.department_id ||
+      me?.department_ids?.includes(d.id) ||
+      hasBusinessPermission("series", "create", d.id),
+  );
+});
 const canRenameSeries = computed(
   () => state.me?.is_admin || state.me?.can_rename_meetings,
 );
@@ -87,8 +104,10 @@ async function loadRenameSeries() {
   } catch (error: any) {
     if (generation === renameSearchGeneration) {
       renameOptions.value = [];
-      renamePermissionsError.value =
-        error.message || "会议系列编辑权限读取失败";
+      renamePermissionsError.value = chineseError(
+        error,
+        "会议系列编辑权限读取失败",
+      );
     }
   }
 }
@@ -139,7 +158,7 @@ async function saveSeriesName() {
     ElMessage.success("会议系列名称已更新");
     await Promise.all([load(true), loadHistory(true)]);
   } catch (error: any) {
-    renameError.value = error.message || "修改失败，请重试";
+    renameError.value = chineseError(error, "修改失败，请重试");
   } finally {
     renameSaving.value = false;
   }
@@ -211,7 +230,7 @@ async function loadHistory(silent = false) {
     }
   } catch (error: any) {
     if (current === historyGeneration && !silent)
-      historyError.value = error.message || "历史会议读取失败";
+      historyError.value = chineseError(error, "历史会议读取失败");
   } finally {
     if (current === historyGeneration) historyBusy.value = false;
   }
@@ -273,8 +292,14 @@ async function load(silent = false) {
         return;
       }
       loadError.value = "";
-      if (activeSeries.value) rows.value = visible.items;
-      else {
+      if (activeSeries.value) {
+        rows.value = visible.items;
+        seriesStartAllowedKey.value =
+          activeSeries.value.startsWith("series:") &&
+          (r.can_start_meeting ?? state.me?.is_admin)
+            ? activeSeries.value
+            : "";
+      } else {
         seriesRows.value = r.items;
         seriesMeetingTotal.value = r.meeting_total;
         void loadRenameSeries();
@@ -283,9 +308,10 @@ async function load(silent = false) {
     }
   } catch (error: any) {
     if (g === generation && !silent) {
-      loadError.value = error.message || "服务暂时不可用";
+      loadError.value = chineseError(error, "服务暂时不可用");
       rows.value = [];
       seriesRows.value = [];
+      seriesStartAllowedKey.value = "";
       total.value = 0;
       seriesMeetingTotal.value = 0;
     }
@@ -318,8 +344,14 @@ function backToSeries() {
   search.value = "";
   router.push({ path: "/meetings" });
 }
+function openContinuationRequest(row: any) {
+  router.push({
+    path: `/meetings/${row.id}`,
+    query: { series: activeSeries.value, request: "continue" },
+  });
+}
 function newMeeting() {
-  if (!activeSeries.value.startsWith("series:")) return;
+  if (!canCreateMeeting.value) return;
   router.push({
     path: "/meetings/new",
     query: { series: activeSeries.value },
@@ -327,15 +359,9 @@ function newMeeting() {
 }
 function openCreateSeries() {
   createSeriesName.value = "";
-  createSeriesKind.value = "department";
-  const choices = state.directory.departments.filter((d: any) =>
-    hasBusinessPermission(
-      "series",
-      "create",
-      d.id,
-      d.id === state.me?.department_id,
-    ),
-  );
+  const choices = creationDepartments.value;
+  createSeriesKind.value =
+    choices.length || state.me?.is_admin ? "department" : "special";
   createSeriesDepartment.value =
     choices.find((d: any) => d.id === state.me?.department_id)?.id ||
     choices[0]?.id ||
@@ -350,6 +376,14 @@ async function createSeries() {
     createSeriesError.value = "请输入会议系列名称";
     return;
   }
+  if (
+    !state.me?.is_admin &&
+    createSeriesKind.value === "department" &&
+    !createSeriesDepartment.value
+  ) {
+    createSeriesError.value = "请选择所属部门";
+    return;
+  }
   creatingSeries.value = true;
   createSeriesError.value = "";
   try {
@@ -358,25 +392,22 @@ async function createSeries() {
       kind: createSeriesKind.value,
       department_id: createSeriesDepartment.value || null,
     });
-    if (!state.directory.series.some((item: any) => item.id === series.id))
-      state.directory.series.push(series);
+    const known = state.directory.series.find(
+      (item: any) => item.id === series.id,
+    );
+    if (known) Object.assign(known, series);
+    else state.directory.series.push(series);
     createSeriesVisible.value = false;
     search.value = "";
-    if (series.existing || hasActiveFilters.value) {
-      await router.push({
-        path: "/meetings",
-        query: { series: `series:${series.id}` },
-      });
-    } else {
-      await load(true);
-    }
+    await router.push({
+      path: "/meetings",
+      query: { series: `series:${series.id}` },
+    });
     ElMessage.success(
-      series.existing
-        ? "已进入已有会议系列，可查看历史会议或添加会议"
-        : "会议系列已建立，点击它可添加会议",
+      series.existing ? "已进入已有会议系列" : "会议系列已建立",
     );
   } catch (error: any) {
-    createSeriesError.value = error.message || "会议系列创建失败，请重试";
+    createSeriesError.value = chineseError(error, "会议系列创建失败，请重试");
   } finally {
     creatingSeries.value = false;
   }
@@ -532,13 +563,7 @@ function changed(r?: any) {
     <div>
       <h1>会议纪要与任务单</h1>
     </div>
-    <div
-      v-if="
-        activeSeries.startsWith('series:') &&
-        hasBusinessPermission('meetings', 'import')
-      "
-      class="actions"
-    >
+    <div v-if="canCreateMeeting" class="actions">
       <el-button type="primary" size="large" @click="newMeeting"
         >＋ 新建会议</el-button
       >
@@ -634,7 +659,6 @@ function changed(r?: any) {
         <span class="muted small">共 {{ seriesMeetingTotal }} 场最新会议</span>
         <el-button
           type="primary"
-          v-if="hasBusinessPermission('series', 'create')"
           :loading="creatingSeries"
           @click="openCreateSeries"
           >＋ 新建会议系列</el-button
@@ -807,14 +831,7 @@ function changed(r?: any) {
           :disabled="creatingSeries"
         >
           <el-option
-            v-for="d in state.directory.departments.filter((d: any) =>
-              hasBusinessPermission(
-                'series',
-                'create',
-                d.id,
-                d.id === state.me?.department_id,
-              ),
-            )"
+            v-for="d in creationDepartments"
             :key="d.id"
             :value="d.id"
             :label="departmentPath(d.id)"
@@ -827,7 +844,11 @@ function changed(r?: any) {
           aria-label="新系列会议类型"
           :disabled="creatingSeries"
         >
-          <el-radio value="department">部门例会</el-radio>
+          <el-radio
+            value="department"
+            :disabled="!creationDepartments.length && !state.me?.is_admin"
+            >部门例会</el-radio
+          >
           <el-radio value="special">专项会议</el-radio>
         </el-radio-group>
       </el-form-item>
@@ -963,11 +984,9 @@ function changed(r?: any) {
             @click="run(() => continueMeeting(row))"
             >接续新建</el-button
           ><el-button
-            v-if="
-              row.can_request_edit && row.published_version && row.series_id
-            "
+            v-if="row.can_request_continue"
             link
-            @click="router.push('/meetings/' + row.id)"
+            @click="openContinuationRequest(row)"
             >申请接续权限</el-button
           ><el-button
             v-if="row.can_delete"
@@ -1060,11 +1079,9 @@ function changed(r?: any) {
               >接续新建</el-button
             >
             <el-button
-              v-if="
-                row.can_request_edit && row.published_version && row.series_id
-              "
+              v-if="row.can_request_continue"
               link
-              @click="router.push('/meetings/' + row.id)"
+              @click="openContinuationRequest(row)"
               >申请接续权限</el-button
             >
             <el-button
@@ -1231,6 +1248,12 @@ function changed(r?: any) {
                 >接续新建</el-button
               >
               <el-button
+                v-if="row.can_request_continue"
+                link
+                @click="openContinuationRequest(row)"
+                >申请接续权限</el-button
+              >
+              <el-button
                 v-if="row.can_delete"
                 link
                 type="danger"
@@ -1284,6 +1307,12 @@ function changed(r?: any) {
                   :disabled="!!continuingId"
                   @click="run(() => continueMeeting(row))"
                   >接续新建</el-button
+                >
+                <el-button
+                  v-if="row.can_request_continue"
+                  link
+                  @click="openContinuationRequest(row)"
+                  >申请接续权限</el-button
                 >
                 <el-button
                   v-if="row.can_delete"

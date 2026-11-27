@@ -17,6 +17,7 @@ const props = defineProps<{
   disabled?: boolean;
   includeInactive?: boolean;
   popperClass?: string;
+  openAbove?: boolean;
   allowedIds?: string[];
   ariaLabel?: string;
   users?: any[];
@@ -502,6 +503,7 @@ function onPaste(event: ClipboardEvent) {
       :disabled="disabled"
       :aria-label="ariaLabel"
       :popper-class="popperClass"
+      :placement="openAbove ? 'top-start' : 'bottom-start'"
       :popper-style="
         searchOnly && !keyword.trim() ? { display: 'none' } : undefined
       "

@@ -170,10 +170,13 @@ def test_edit_and_withdraw_dispatch_without_create_permission(client,db,team):
     assert client.post(f"/api/tasks/{task.id}/withdraw",headers=auth(person),json={"expected_version":2,"reason":"取消"}).status_code==200
 
 
-def test_ordinary_job_title_cannot_create_series_or_dispatch_and_logs_remain_admin_only(client,db,team):
+def test_staff_create_own_series_without_grant_and_job_title_cannot_grant_admin_or_dispatch(client,db,team):
     person=team["colleague"];person.position="董事长";db.flush()
     grant(db,person,[rule("reports",["view","export"],"all")])
-    assert client.post("/api/series",headers=auth(person),json={"name":"越权系列"}).status_code==403
+    assert client.post("/api/series", headers=auth(person), json={"name": "个人新系列"}).status_code == 200
+    assert client.post("/api/series", headers=auth(person), json={
+        "name": "外部门系列", "department_id": team["other"].id,
+    }).status_code == 403
     assert client.get("/api/admin/roles",headers=auth(person)).status_code==403
     assert client.get("/api/admin/operation-logs",headers=auth(person)).status_code==403
     assert not client.get("/api/direct-assignments/options",headers=auth(person)).json()["can_assign"]

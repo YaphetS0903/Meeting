@@ -9,7 +9,11 @@ from typing import Literal
 from zoneinfo import ZoneInfo
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+from app.error_messages import http_error_response, unexpected_error_response, validation_response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, or_, select, text
@@ -81,6 +85,7 @@ from app.services.access import (
     meeting_access,
     meeting_attachment_visible,
     related_meetings,
+    startable_series_ids,
     task_access,
     visible_directory,
     visible_meeting_attachment_ids,
@@ -152,6 +157,9 @@ app = FastAPI(title="会议纪要任务单系统", version="0.1.0", lifespan=lif
 
 app.include_router(business_role_router)
 app.include_router(operation_log_router)
+app.add_exception_handler(RequestValidationError, validation_response)
+app.add_exception_handler(StarletteHTTPException, http_error_response)
+app.add_exception_handler(Exception, unexpected_error_response)
 app.add_middleware(OperationContextMiddleware)
 
 app.include_router(extra_router)
@@ -168,7 +176,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=get_settings().cors_origins,
     allow_methods=["*"],
-    allow_headers=["Authorization", "Content-Type"],
+    allow_headers=["Authorization", "Content-Type", "X-Operation-Context", "X-Client-Page"],
     allow_credentials=False,
 )
 
@@ -261,6 +269,7 @@ def me(user: User = Depends(current_user), db: Session = Depends(get_db)):
 @app.get("/api/directory")
 def directory(db: Session = Depends(get_db), user: User = Depends(current_user)):
     visible = visible_directory(db, user)
+    startable = startable_series_ids(db, user, visible["series"])
     memberships = {person.id: set() for person in visible["users"]}
     department_scope = {department.id for department in visible["departments"]}
     for person_id, department_id in db.execute(
@@ -291,7 +300,10 @@ def directory(db: Session = Depends(get_db), user: User = Depends(current_user))
             }
             for u in sorted(visible["users"], key=lambda item: (item.name, item.id))
         ],
-        "series": [record(s) for s in sorted(visible["series"], key=lambda item: item.name)],
+        "series": [
+            {**record(s), "can_start_meeting": s.id in startable}
+            for s in sorted(visible["series"], key=lambda item: item.name)
+        ],
     }
 
 
@@ -368,9 +380,10 @@ def add_series(body: NewSeries, db: Session = Depends(get_db), user: User = Depe
     department_id = body.department_id or user.department_id or (departments[0] if departments else None)
     if department_id and not db.get(Department, department_id):
         raise HTTPException(422, "所属部门不存在")
-    if not department_id and not user.is_admin:
-        raise HTTPException(403, "请先确认所属部门后再新建会议系列")
-    require_permission(db, user, "series.create", department_id, related=department_id in departments)
+    if not department_id and not user.is_admin and body.kind == "department":
+        raise HTTPException(403, "没有所属部门时请选择专项会议系列")
+    if department_id and department_id not in departments:
+        require_permission(db, user, "series.create", department_id)
     old = db.scalar(
         visible_series(db, user).where(
             MeetingSeries.name == name, MeetingSeries.department_id == department_id
@@ -379,7 +392,7 @@ def add_series(body: NewSeries, db: Session = Depends(get_db), user: User = Depe
     if old:
         if old.kind in {"department", "special"} and old.kind != body.kind:
             raise HTTPException(409, "同名会议系列已存在，但会议类型不同，请核对系列名称")
-        return {**record(old), "existing": True}
+        return {**record(old), "existing": True, "can_start_meeting": old.id in startable_series_ids(db, user, [old])}
     series = MeetingSeries(name=name, department_id=department_id, kind=body.kind)
     db.add(series)
     db.flush()
@@ -394,7 +407,7 @@ def add_series(body: NewSeries, db: Session = Depends(get_db), user: User = Depe
             "kind": series.kind,
         },
     )
-    return {**record(series), "existing": False}
+    return {**record(series), "existing": False, "can_start_meeting": True}
 
 
 def archive_query(
@@ -595,9 +608,12 @@ def meetings(
     user: User = Depends(current_user),
 ):
     query = archive_query(db, user, start, end, department_id, kind, publication, q, scope, view=view)
+    series_can_start = False
     if series_key:
         if series_key.startswith("series:") and len(series_key) > len("series:"):
+            series = db.scalar(visible_series(db, user).where(MeetingSeries.id == series_key[len("series:") :]))
             query = query.where(Meeting.series_id == series_key[len("series:") :])
+            series_can_start = bool(series and startable_series_ids(db, user, [series]))
         elif series_key == "unassigned":
             query = query.where(Meeting.series_id.is_(None))
         elif series_key.startswith("unassigned:") and len(series_key) > len("unassigned:"):
@@ -660,6 +676,7 @@ def meetings(
             db, user, meeting, "continue"
         )
         view["can_request_edit"] = not can_edit_meeting(db, user, meeting)
+        view["can_request_continue"] = bool(meeting.published_version and meeting.series_id) and not view["can_continue"]
         view["can_delete"] = can_delete_meeting(db, user, meeting)
         view["pending_edit_count"] = pending.get(meeting.id, 0)
         result.append(view)
@@ -669,6 +686,7 @@ def meetings(
     return {
         "total": total,
         "items": result,
+        "can_start_meeting": series_can_start,
         "pending_meetings": pending,
         "pending_file_issues": file_issues,
         "unknown_import_scope": unassigned,
@@ -765,6 +783,8 @@ def get_meeting(identifier: str, db: Session = Depends(get_db), user: User = Dep
             "can_delete": can_delete_meeting(db, user, meeting),
             "can_continue": bool(meeting.published_version and meeting.series_id)
             and meeting_allowed(db, user, meeting, "continue"),
+            "can_request_continue": bool(meeting.published_version and meeting.series_id)
+            and not meeting_allowed(db, user, meeting, "continue"),
             "permissions": {
                 action: meeting_allowed(db, user, meeting, action)
                 for action in (
@@ -839,7 +859,10 @@ def request_meeting_edit(identifier: str, db: Session = Depends(get_db), user: U
     if not meeting:
         raise HTTPException(404, "会议不存在")
     meeting_access(db, user, meeting)
-    if can_edit_meeting(db, user, meeting):
+    needs_continuation = bool(meeting.published_version and meeting.series_id) and not meeting_allowed(
+        db, user, meeting, "continue"
+    )
+    if can_edit_meeting(db, user, meeting) and not needs_continuation:
         raise HTTPException(409, "您已有此会议的编辑权限")
     request = db.scalar(
         select(MeetingEditRequest)
@@ -1549,6 +1572,22 @@ def tasks(
             }
         )
     return {"items": values, "total": total} if offset is not None else values
+
+
+@app.get("/api/task-history")
+def list_task_history(
+    mine: bool = True,
+    state: str | None = None,
+    q: str = "",
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+):
+    from app.services.task_history import task_history
+
+    records = tasks(mine=mine, current=False, offset=None, db=db, user=user)
+    return task_history(db, user, records, mine=mine, state=state, q=q, offset=offset, limit=limit)
 
 
 class DirectAssignmentCreate(BaseModel):

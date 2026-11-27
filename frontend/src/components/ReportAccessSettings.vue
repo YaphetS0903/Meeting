@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { chineseError } from "../errorMessages";
 import { computed, onMounted, ref } from "vue";
 import { ElMessage } from "element-plus";
 import { api, state, departmentPath } from "../api";
@@ -58,7 +59,7 @@ async function load() {
     expectedDepartments.value = [...ids];
     loaded.value = true;
   } catch (e: any) {
-    error.value = e.message || "报表授权读取失败，请重试";
+    error.value = chineseError(e, "报表授权读取失败，请重试");
   } finally {
     loading.value = false;
   }
@@ -85,7 +86,7 @@ async function save() {
     );
     emit("close");
   } catch (e: any) {
-    error.value = e.message || "保存失败，请重试";
+    error.value = chineseError(e, "保存失败，请重试");
   } finally {
     saving.value = false;
   }

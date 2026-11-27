@@ -47,12 +47,116 @@ def test_combines_person_results_with_weighted_existing_denominators(db, team):
     rows = {r["id"]: r for r in data["groups"]}
     assert rows[team["a"].id]["regular"]["rate"] == .5
     assert rows[team["a"].id]["direct"]["rate"] == .5
-    assert rows[team["a"].id]["total"] == dict(items=4, assessed=4, completed=2, incomplete=2, rate=.5)
-    assert rows[team["b"].id]["total"] == dict(items=3, assessed=2, completed=2, incomplete=0, rate=1)
+    assert rows[team["a"].id]["total"] == dict(items=4, assessed=4, completed=2, incomplete=2, not_due=0, excluded=0, closed=0, rate=.5)
+    assert rows[team["b"].id]["total"] == dict(items=3, assessed=2, completed=2, incomplete=0, not_due=1, excluded=0, closed=0, rate=1)
     assert data["summary"]["total"]["items"] == 7
     assert data["summary"]["total"]["rate"] == pytest.approx(4 / 6)
     assert rows[team["colleague"].id]["total"]["rate"] is None
     assert rows[team["a"].id]["meetings"][0]["title"] == "人员统计会议"
+
+
+
+@pytest.mark.parametrize("actor", ["a", "host"])
+def test_meeting_reports_share_performance_deadline_rules(db, team, client, actor):
+    person = team["a"]
+    cases = [
+        ("OA验收流程开发", "未到期", date(2026, 8, 3), date(2026, 8, 10)),
+        ("OA验收流程开发", "未到期", date(2026, 8, 10), date(2026, 8, 17)),
+        ("OA验收流程开发", "未到期", date(2026, 8, 17), date(2026, 9, 4)),
+        ("费用预算OA系统", "未完成", date(2026, 8, 10), date(2026, 8, 10)),
+        ("费用预算OA系统", "未完成", date(2026, 8, 17), date(2026, 8, 17)),
+    ]
+    tasks = {}
+    for title, status, meeting_date, due_date in cases:
+        meeting = issue(db, team, owners=[person.id], status=status)
+        meeting.meeting_date = meeting_date
+        assessment = db.scalar(select(Assessment).where(Assessment.meeting_id == meeting.id))
+        if title not in tasks:
+            tasks[title] = task(db, team, due=due_date, source_meeting_id=meeting.id)
+        tasks[title].due_date = due_date
+        assessment.task_id = tasks[title].id
+        assessment.content = title
+        assessment.due_date = due_date
+    db.flush()
+
+    headers = auth(team[actor])
+    for period, expected_rows in [
+        (PARAMS, [("费用预算OA系统", "未完成")] * 2),
+        ({"start": "2026-09-01", "end": "2026-09-30"}, [("OA验收流程开发", "未到期")]),
+    ]:
+        params = {**period, "person_id": person.id}
+        meeting_params = {**params, "group_by": "department_people"}
+        def get(endpoint, query):
+            response = client.get(endpoint, params=query, headers=headers)
+            assert response.status_code == 200, response.text
+            return response
+
+        meeting_summary = get("/api/reports", {**meeting_params, "include_details": False}).json()["summary"]
+        performance = get("/api/reports/performance", params).json()["summary"]["regular"]
+        assert meeting_summary["items"] == performance["items"] == len(expected_rows)
+        assert meeting_summary["counts"]["未完成"] == performance["incomplete"]
+        assert meeting_summary["counts"]["未到期"] == performance["not_due"]
+        assert meeting_summary["rate"] == performance["rate"]
+
+        meeting_details = get("/api/reports", {**meeting_params, "details_only": True}).json()
+        performance_details = get("/api/reports/performance/details", params).json()
+        assert meeting_details["details_total"] == performance_details["details_total"] == len(expected_rows)
+        assert meeting_details["details"] == performance_details["details"]
+        assert [(row["content"], row["status"]) for row in meeting_details["details"]] == expected_rows
+        if period != PARAMS:
+            assert meeting_details["details"][0]["due_date"] == "2026-09-04"
+
+        exported = get("/api/reports/export", meeting_params)
+        workbook = openpyxl.load_workbook(BytesIO(exported.content))
+        assert int(workbook["考核汇总"]["B3"].value) == len(expected_rows)
+        assert [(row[6], row[8]) for row in workbook["考核明细"].iter_rows(min_row=2, values_only=True)] == expected_rows
+
+
+@pytest.mark.parametrize("actor", ["a", "host"])
+def test_status_details_match_performance_counts_before_pagination(db, team, client, actor):
+    person = team["a"]
+    for status in ("已完成", "未完成", "未到期", "不统计", "关闭"):
+        issue(db, team, owners=[person.id], status=status)
+    approved = task(db, team, due=date(2026, 8, 20), request="approved")
+    pending = task(db, team, due=date(2026, 8, 17), request="pending")
+    unfinished = task(db, team, due=date(2026, 8, 18))
+    future = task(db, team, due=date(2026, 8, 25), request="approved")
+    task(db, team, owners=[team["outsider"]], due=date(2026, 8, 19))
+    headers = auth(team[actor])
+    params = {**PARAMS, "person_id": person.id, "department_id": team["dep"].id}
+    result = client.get("/api/reports/performance", params=params, headers=headers)
+    assert result.status_code == 200, result.text
+    summary = result.json()["summary"]
+    for key, status, direct_ids in [
+        ("completed", "已完成", [approved.id]),
+        ("incomplete", "未完成", [pending.id, unfinished.id]),
+        ("not_due", "未到期", [future.id]),
+        ("excluded", "不统计", []),
+        ("closed", "已关闭", []),
+    ]:
+        for source in ("regular", "direct"):
+            def page(offset):
+                response = client.get("/api/reports/performance/details", headers=headers, params={
+                    **params, "source": source, "status": status, "limit": 1, "offset": offset,
+                })
+                assert response.status_code == 200, response.text
+                return response.json()
+
+            first = page(0)
+            assert first["details_total"] == summary[source][key]
+            if source == "regular":
+                assert [row["status"] for row in first["details"]] == ["关闭" if key == "closed" else status]
+            else:
+                rows = first["details"] + (page(1)["details"] if len(direct_ids) > 1 else [])
+                assert [row["id"] for row in rows] == direct_ids
+                assert all(row["status"] == status for row in rows)
+
+    if actor == "a":
+        for source in ("regular", "direct"):
+            denied = client.get("/api/reports/performance/details", headers=headers, params={
+                **PARAMS, "person_id": team["outsider"].id, "source": source, "status": "未完成",
+            })
+            assert denied.status_code == 403
 
 
 def test_existing_exclusions_apply_to_directory_counts_details_and_exports(db, team, client):
@@ -74,6 +178,9 @@ def test_existing_exclusions_apply_to_directory_counts_details_and_exports(db, t
     assert exported.status_code == 200
     sheet = openpyxl.load_workbook(BytesIO(exported.content)).active
     assert sheet.title == "绩效统计"
+    assert [cell.value for cell in sheet[2]] == [
+        "姓名", "任务总数", "已完成", "未完成", "未到期", "不统计", "已关闭", "绩效达成率",
+    ]
     assert all("机器人" not in str(cell.value) for row in sheet for cell in row)
     assert before == db.scalar(select(func.count()).select_from(Assessment)) == 3
     assert db.get(User, bot.id).active

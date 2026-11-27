@@ -112,7 +112,7 @@ async function fixture(page: Page, admin = false, large = false) {
     }
     return route.fulfill({ json: body });
   });
-  await page.goto("/reports");
+  await page.goto("/reports?view=regular");
   await expect(
     page.locator(admin ? ".stat-grid" : "#department-people-results"),
   ).toBeVisible();
@@ -150,7 +150,10 @@ for (const width of [1440, 1366, 390]) {
         register.getByRole("columnheader", { name, exact: true }),
       ).toHaveCount(1);
     await expect(register).not.toContainText("另一位员工");
-    await expect(page.locator(".stat-grid")).toHaveCount(0);
+    await expect(
+      page.getByRole("heading", { name: "任务状态分布" }),
+    ).toBeVisible();
+    await expect(page.locator(".report-kpi-rate strong")).toHaveText("100.0%");
     await expect(
       page.getByRole("combobox", { name: "筛选部门", exact: true }),
     ).toHaveCount(0);

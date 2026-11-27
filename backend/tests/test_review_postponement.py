@@ -19,6 +19,8 @@ from app.services.business import (
     save_meeting,
 )
 from app.services.exports import pdf_minutes, task_rows, xlsx_minutes
+from app.services.performance_reporting import performance_meeting_report, performance_report
+from tests.test_department_people_report import issue
 
 
 def setup_review(db, team, draft_factory):
@@ -213,3 +215,32 @@ def test_exports_display_original_and_latest_date_without_duplicate_rows(db, tea
     output = "".join(page.extract_text() for page in PdfReader(BytesIO(pdf_minutes(review.draft))).pages)
     compact = "".join(output.split())
     assert "2026-08-17" in compact and "2026-08-28" in compact and "最新日期" not in compact
+
+
+def test_performance_deduplicates_pending_and_moves_it_only_after_published_postponement(db, team, draft_factory):
+    _, task, first = setup_review(db, team, draft_factory)
+    save_postponement(db, team, first)
+    publish_review(db, team, first)
+    followup = draft_factory(section="review", when=date(2026, 8, 19), task_id=task.id, task_version=task.version)
+    followup.items[0].due_date = task.due_date
+    second = create_meeting(db, team["host"], followup)
+    save_postponement(db, team, second, date(2026, 9, 4))
+    for _ in range(2):
+        issue(db, team, owners=[team["a"].id], status="未完成")
+
+    def august():
+        return performance_report(db, team["a"], date(2026, 8, 1), date(2026, 8, 31))["summary"]["total"]
+
+    assert august()["not_due"] == 1
+    assert august()["incomplete"] == 2
+    publish_review(db, team, second)
+    assert august()["not_due"] == 0
+    assert august()["items"] == august()["incomplete"] == 2
+
+    september = performance_meeting_report(
+        db, team["a"], date(2026, 9, 1), date(2026, 9, 30), None, team["a"].id, details_only=True,
+    )
+    assert september["details_total"] == 1
+    assert september["details"][0]["task_id"] == task.id
+    assert september["details"][0]["due_date"] == "2026-09-04"
+    assert september["details"][0]["status"] == "未到期"

@@ -5,7 +5,7 @@ defineProps<{ value: string }>();
   <span
     class="status-tag"
     :class="{
-      'is-success': ['已完成', '关闭'].includes(value),
+      'is-success': ['已完成', '关闭', '已关闭'].includes(value),
       'is-danger': value === '未完成',
       'is-muted': value === '不统计',
     }"

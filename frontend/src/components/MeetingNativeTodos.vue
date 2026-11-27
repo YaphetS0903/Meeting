@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { chineseError } from "../errorMessages";
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { api } from "../api";
 import { confirmAssignedTodo, type NativeResult } from "../nativeAssignment";
@@ -82,7 +83,7 @@ async function load() {
   } catch (e: any) {
     if (current === generation) {
       plan.value = null;
-      error.value = e.message || "无法读取待办状态，请重试";
+      error.value = chineseError(e, "无法读取待办状态，请重试");
     }
   } finally {
     if (current === generation) loading.value = false;
@@ -145,7 +146,7 @@ async function dispatch() {
       ? "本轮确认已完成，请核对下方每项任务的待办状态。"
       : "没有需要新建的待办，请核对已有待办及待处理事项。";
   } catch (e: any) {
-    progress.value = `会议已发布，待办派发中断：${e.message || "请刷新状态后继续"}`;
+    progress.value = `会议已发布，待办派发中断：${chineseError(e, "请刷新状态后继续")}`;
   } finally {
     if (!disposed) await load();
     busy.value = false;

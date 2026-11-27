@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { chineseError } from "../errorMessages";
 import { computed, onMounted, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { api, departmentPath, run, state } from "../api";
@@ -82,7 +83,7 @@ async function load() {
     selectUser();
     loaded.value = true;
   } catch (e: any) {
-    error.value = e.message || "授权列表读取失败，请重新加载";
+    error.value = chineseError(e, "授权列表读取失败，请重新加载");
   } finally {
     loading.value = false;
   }
@@ -114,7 +115,7 @@ async function persist(userId: string, ids: string[], expected: string[]) {
         : "手动部门负责人授权已撤销",
     );
   } catch (e: any) {
-    error.value = e.message || "保存失败，请重新加载后重试";
+    error.value = chineseError(e, "保存失败，请重新加载后重试");
   } finally {
     saving.value = false;
   }

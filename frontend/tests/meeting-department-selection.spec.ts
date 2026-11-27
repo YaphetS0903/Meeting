@@ -110,7 +110,8 @@ async function fixture(page: Page, existing = true) {
       ? "/meetings/department-meeting"
       : "/meetings/new?series=series:weekly",
   );
-  await page.getByRole("button", { name: "编辑", exact: true }).click();
+  if (existing)
+    await page.getByRole("button", { name: "编辑", exact: true }).click();
   await expect(
     page.getByRole("combobox", { name: "会议所属部门", exact: true }),
   ).toBeVisible();
@@ -174,6 +175,9 @@ test("new meeting defaults to its visible series department instead of the recor
     .filter({ hasText: "会议名称" })
     .getByRole("textbox");
   await title.fill("新建项目部周例会");
+  await page
+    .getByRole("button", { name: "确认并填写任务单", exact: true })
+    .click();
   await page.getByRole("button", { name: "保存草稿", exact: true }).click();
   await expect.poll(() => control.saved.at(-1)?.department_id).toBe("project");
   expect(control.errors).toEqual([]);

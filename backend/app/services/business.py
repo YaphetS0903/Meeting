@@ -37,6 +37,7 @@ from app.schemas import (
     VerifyCompletion,
 )
 from app.services.access import (
+    startable_series_ids,
     can_confirm_meeting_results,
     can_manage_direct_task,
     department_ids,
@@ -544,6 +545,17 @@ def validate_series_kind(db: Session, draft: MeetingDraft, previous=None):
         raise HTTPException(422, "会议类型由所属系列固定，不能单独修改；请选择匹配的会议系列")
 
 
+def require_series_start(db, actor, series_id):
+    if not series_id or actor.is_admin:
+        return
+    # Serialize the first meeting in an empty series with other attempts to start it.
+    series = locked_get(db, MeetingSeries, series_id)
+    if not series:
+        raise HTTPException(422, "会议系列不存在")
+    if series_id not in startable_series_ids(db, actor, [series]):
+        raise HTTPException(403, "请从系列内已发布的会议申请接续权限，或联系系列创建人建立首场会议")
+
+
 def create_meeting(
     db: Session,
     actor: User,
@@ -556,6 +568,8 @@ def create_meeting(
     from app.services.historical_backfill import validate_mode
 
     validate_mode(db, actor, draft)
+    if not (historical or sheet_import or continuation_from):
+        require_series_start(db, actor, draft.series_id)
     historical = historical or draft.history_backfill
     if draft.sheet_import_id and (not sheet_import or draft.sheet_import_id != sheet_import.id):
         raise HTTPException(422, "请使用任务单导入入口创建会议")
@@ -617,6 +631,8 @@ def save_meeting(db: Session, actor: User, meeting_id: str, draft: MeetingDraft,
         imported_history = meeting.historical and not meeting.draft.get("history_backfill")
         meeting.historical = bool(imported_history or draft.history_backfill)
     validate_series_kind(db, draft, {"series_id": meeting.series_id, "kind": meeting.kind})
+    if draft.series_id != meeting.series_id:
+        require_series_start(db, actor, draft.series_id)
     known = {i.get("task_id") for i in meeting.draft.get("items", []) if i.get("task_id")}
     for identifier in {i.task_id for i in draft.items if i.task_id} - known:
         task = db.get(Task, identifier)
@@ -698,6 +714,7 @@ def move_meeting_series(db: Session, actor: User, meeting_id: str, series_id: st
     old_series_id = meeting.series_id
     if old_series_id == series_id:
         return meeting
+    require_series_start(db, actor, series_id)
     sync_meeting_task_scope(db, actor, meeting, meeting.department_id, series_id)
     meeting.series_id = series_id
     meeting.draft = {**meeting.draft, "series_id": series_id}
@@ -904,6 +921,8 @@ def publish(db: Session, actor: User, meeting_id: str, command: PublishRequest):
         raise HTTPException(422, "修订必须说明原因")
     draft = MeetingDraft.model_validate(meeting.draft)
     validate_series_kind(db, draft, {"series_id": meeting.series_id, "kind": meeting.kind})
+    if draft.series_id != meeting.series_id:
+        require_series_start(db, actor, draft.series_id)
     if command.shared_recipients:
         draft.recipient_ids = list(dict.fromkeys(draft.recipient_ids))
         draft.cc_ids = list(
@@ -1947,7 +1966,8 @@ def continue_meeting(db: Session, actor: User, meeting_id: str):
     source = locked_get(db, Meeting, meeting_id)
     if not source:
         raise HTTPException(404, "会议不存在")
-    meeting_require(db, actor, source, "continue")
+    if not meeting_allowed(db, actor, source, "continue"):
+        raise HTTPException(403, "请先申请此会议的接续权限，审批通过后再新建会议")
     if not source.published_version:
         raise HTTPException(409, "请先发布原会议，再接续新建")
     version = db.scalar(

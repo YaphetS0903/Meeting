@@ -1,3 +1,5 @@
+import { ElMessage } from "element-plus";
+import { chineseError, reportClientError } from "./errorMessages";
 import { createApp } from "vue";
 import { createRouter, createWebHistory } from "vue-router";
 import ElementPlus from "element-plus";
@@ -48,4 +50,18 @@ const router = createRouter({
     { path: "/:pathMatch(.*)*", redirect: "/meetings" },
   ],
 });
-createApp(App).use(router).use(ElementPlus, { locale: zhCn }).mount("#app");
+const app = createApp(App).use(router).use(ElementPlus, { locale: zhCn });
+app.config.errorHandler = (error) => {
+  reportClientError("browser");
+  ElMessage.error(chineseError(error));
+};
+router.onError(() => {
+  reportClientError("route");
+  ElMessage.error("页面加载失败，请重新打开该功能");
+});
+window.addEventListener("unhandledrejection", (event) => {
+  if (event.reason === "cancel" || event.reason === "close") return;
+  reportClientError("browser");
+  ElMessage.error(chineseError(event.reason));
+});
+app.mount("#app");

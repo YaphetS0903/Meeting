@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { chineseError } from "../errorMessages";
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
@@ -81,7 +82,7 @@ async function load(silent = false) {
     }
   } catch (failure: any) {
     if (current === generation && !silent) {
-      error.value = failure.message || "历史会议读取失败";
+      error.value = chineseError(failure, "历史会议读取失败");
       rows.value = [];
       total.value = 0;
     }
@@ -157,13 +158,10 @@ async function removeMeeting(row: any) {
     deletingId.value = "";
   }
 }
-watch(
-  [department, series],
-  () => {
-    page.value = 1;
-    load();
-  },
-);
+watch([department, series], () => {
+  page.value = 1;
+  load();
+});
 onBeforeUnmount(() => {
   generation += 1;
 });

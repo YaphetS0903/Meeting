@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { chineseError } from "../errorMessages";
 import { ref, onMounted, onBeforeUnmount, computed, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
@@ -35,6 +36,15 @@ const route = useRoute(),
 const reminderDay = computed(() =>
   typeof route.query.reminder_day === "string" ? route.query.reminder_day : "",
 );
+const historyView = computed(
+  () => !reminderDay.value && route.query.view === "history",
+);
+async function switchTaskView(value: string | number | boolean | undefined) {
+  await router.replace({
+    path: "/tasks",
+    query: value === "history" ? { view: "history" } : {},
+  });
+}
 async function showAllTasks() {
   await router.replace({ path: "/tasks" });
 }
@@ -57,7 +67,16 @@ const inboxStatuses = [
   "未到期",
   "不统计",
 ];
-const taskStatus = (task: any) => task.todo_status || task.status;
+const statusOptions = computed(() =>
+  (historyView.value
+    ? [...inboxStatuses, "关闭", "已撤回", "部分完成"]
+    : inboxStatuses
+  ).map((value) => ({ value, label: value === "关闭" ? "已关闭" : value })),
+);
+const taskStatus = (task: any) => {
+  const value = task.todo_status || task.status;
+  return historyView.value && value === "关闭" ? "已关闭" : value;
+};
 const meetingTitle = (task: any) =>
   task.source_meeting_id
     ? task.inbox_meeting_title || task.source_meeting_title || "来源会议不可见"
@@ -72,12 +91,12 @@ async function load(background = false) {
   loadError.value = "";
   try {
     const result = await api(
-      "/tasks?" +
+      (historyView.value ? "/task-history?" : "/tasks?") +
         query({
           mine: reminderDay.value ? true : mine.value,
           state: status.value,
           q: q.value,
-          current: !reminderDay.value,
+          current: historyView.value ? undefined : !reminderDay.value,
           reminder_day: reminderDay.value,
           offset: (page.value - 1) * pageSize.value,
           limit: pageSize.value,
@@ -88,15 +107,20 @@ async function load(background = false) {
     );
     if (generation === loadGeneration) {
       total.value = Array.isArray(result) ? result.length : result.total;
-      rows.value = (Array.isArray(result) ? result : result.items).filter(
-        (task: any) =>
-          !task.closed_at && !task.withdrawn_at && taskStatus(task) !== "关闭",
-      );
+      const items = Array.isArray(result) ? result : result.items;
+      rows.value = historyView.value
+        ? items
+        : items.filter(
+            (task: any) =>
+              !task.closed_at &&
+              !task.withdrawn_at &&
+              taskStatus(task) !== "关闭",
+          );
     }
   } catch (error: any) {
     if (generation === loadGeneration) {
       rows.value = [];
-      loadError.value = error.message || "服务暂时不可用";
+      loadError.value = chineseError(error, "服务暂时不可用");
     }
     throw error;
   } finally {
@@ -105,15 +129,32 @@ async function load(background = false) {
 }
 async function open(id: string, background = false) {
   const generation = ++detailGeneration;
+  const archived = historyView.value
+    ? rows.value.find((row) => row.id === id)
+    : null;
   let result;
   try {
-    result = await api("/tasks/" + id, "GET", undefined, { background });
+    result = archived?.history_only
+      ? archived
+      : await api("/tasks/" + id, "GET", undefined, { background });
   } catch (error) {
     if (generation === detailGeneration) throw error;
     return;
   }
   if (generation !== detailGeneration) return;
-  selected.value = result;
+  selected.value = archived
+    ? {
+        ...result,
+        todo_status: archived.todo_status,
+        recorded_status: archived.recorded_status,
+        notes: archived.notes,
+        inbox_meeting_date: archived.inbox_meeting_date,
+        inbox_meeting_title: archived.inbox_meeting_title,
+        source_meeting_title: archived.source_meeting_title,
+        owner_names: archived.owner_names,
+        verifier_name: archived.verifier_name,
+      }
+    : result;
   explanation.value = "";
   evidence.value = [];
   change.value = null;
@@ -143,6 +184,7 @@ async function refreshAfterAction(id: string, generation: number) {
 }
 const canApply = computed(
   () =>
+    !historyView.value &&
     selected.value?.owner_ids.includes(state.me.id) &&
     !selected.value?.closed_at &&
     !selected.value?.requests.some((x) => x.state === "pending"),
@@ -253,9 +295,11 @@ async function withdrawTask() {
     sending.value = false;
   }
 }
-watch(reminderDay, () => {
-  mine.value = true;
+watch([reminderDay, historyView], () => {
+  if (reminderDay.value) mine.value = true;
   q.value = status.value = "";
+  rows.value = [];
+  total.value = 0;
   closeDetail();
   run(search);
 });
@@ -281,6 +325,19 @@ onMounted(() =>
       >全部待办</el-button
     >
   </section>
+  <div v-if="!reminderDay" class="task-view-switch">
+    <el-radio-group
+      :model-value="historyView ? 'history' : 'current'"
+      aria-label="任务查看范围"
+      @change="(value) => run(() => switchTaskView(value))"
+    >
+      <el-radio-button value="current">当前待办</el-radio-button>
+      <el-radio-button value="history">历史任务单</el-radio-button>
+    </el-radio-group>
+    <p v-if="historyView" class="muted small">
+      查看全部已留存任务，包含未完成、已关闭和不统计；历史导入记录也会显示。
+    </p>
+  </div>
   <section class="panel filters filter-row">
     <el-switch
       v-if="!reminderDay"
@@ -294,10 +351,10 @@ onMounted(() =>
       aria-label="任务状态"
       @change="run(search)"
       ><el-option
-        v-for="s in inboxStatuses"
-        :key="s"
-        :value="s"
-        :label="s" /></el-select
+        v-for="s in statusOptions"
+        :key="s.value"
+        :value="s.value"
+        :label="s.label" /></el-select
     ><el-input
       v-model="q"
       placeholder="搜索会议日期、名称或任务内容"
@@ -306,17 +363,21 @@ onMounted(() =>
     /><el-button @click="run(search)">查询</el-button>
   </section>
   <el-alert v-if="loadError" type="error" :closable="false" show-icon>
-    <template #title>待办列表加载失败：{{ loadError }}</template>
+    <template #title
+      >{{ historyView ? "历史任务单" : "待办列表" }}加载失败：{{
+        loadError
+      }}</template
+    >
     <el-button size="small" @click="run(load)">重试加载</el-button>
   </el-alert>
   <section
     v-loading="busy"
     class="panel task-list-panel"
-    aria-label="待办任务列表"
+    :aria-label="historyView ? '历史任务单列表' : '待办任务列表'"
   >
     <div class="task-list-heading">
       <div>
-        <h2>任务列表</h2>
+        <h2>{{ historyView ? "历史任务单" : "任务列表" }}</h2>
       </div>
       <span class="muted small" role="status">{{
         busy
@@ -335,7 +396,11 @@ onMounted(() =>
     >
       <table class="task-table">
         <caption class="task-table-caption">
-          待办任务列表，可点击任务内容或查看详情办理任务
+          {{
+            historyView
+              ? "历史任务单，可点击任务内容或查看详情查阅记录"
+              : "待办任务列表，可点击任务内容或查看详情办理任务"
+          }}
         </caption>
         <colgroup>
           <col class="task-meeting-date-column" />
@@ -468,7 +533,13 @@ onMounted(() =>
     </ul>
     <el-empty
       v-if="!busy && !rows.length"
-      :description="loadError ? '加载失败，请重试' : '当前筛选下没有待办'"
+      :description="
+        loadError
+          ? '加载失败，请重试'
+          : historyView
+            ? '当前筛选下没有历史任务单'
+            : '当前筛选下没有待办'
+      "
     />
     <el-pagination
       v-if="total"
@@ -477,7 +548,7 @@ onMounted(() =>
       :page-sizes="[20, 50, 100]"
       :total="total"
       layout="total, sizes, prev, pager, next"
-      aria-label="待办分页"
+      :aria-label="historyView ? '历史任务单分页' : '待办分页'"
       @current-change="run(() => load())"
       @size-change="
         page = 1;
@@ -488,12 +559,14 @@ onMounted(() =>
   <el-drawer
     :model-value="!!selected"
     @close="closeDetail"
-    title="任务详情"
+    :title="historyView ? '历史任务单详情' : '任务详情'"
     size="min(680px,100vw)"
   >
     <template #header="{ titleId, titleClass }">
       <div class="task-detail-heading">
-        <h2 :id="titleId" :class="titleClass">任务详情</h2>
+        <h2 :id="titleId" :class="titleClass">
+          {{ historyView ? "历史任务单详情" : "任务详情" }}
+        </h2>
         <el-button size="small" :icon="ArrowLeft" @click="closeDetail"
           >返回上一页</el-button
         >
@@ -513,6 +586,13 @@ onMounted(() =>
         <StatusTag v-else :value="taskStatus(selected)" />
       </div>
       <h2>{{ selected.content }}</h2>
+      <p v-if="historyView" class="muted small">
+        历史任务单仅供查阅。已有任务按最新状态展示，历史导入项保留会议中的原始评定。
+      </p>
+      <section v-if="historyView && selected.notes" class="panel section-body">
+        <h3>会议备注</h3>
+        <p class="work-content">{{ selected.notes }}</p>
+      </section>
       <section v-if="selected.requirements" class="panel section-body">
         <h3>补充说明</h3>
         <p style="white-space: pre-wrap; overflow-wrap: anywhere">
@@ -527,10 +607,11 @@ onMounted(() =>
       />
       <el-descriptions :column="1" border
         ><el-descriptions-item label="责任人">{{
+          selected.owner_names?.join("、") ||
           selected.owner_ids.map(person).join("、")
         }}</el-descriptions-item
         ><el-descriptions-item label="验证人">{{
-          person(selected.verifier_id)
+          selected.verifier_name || person(selected.verifier_id)
         }}</el-descriptions-item
         ><el-descriptions-item label="截止日期">{{
           selected.due_date || "未设置"
@@ -570,6 +651,7 @@ onMounted(() =>
         >
       </section>
       <NativeTodoPanel
+        v-if="!historyView"
         :key="selected.id"
         compact
         :task="selected"
@@ -608,7 +690,9 @@ onMounted(() =>
           ></el-timeline-item
         ></el-timeline
       ><el-button
-        v-if="selected.can_edit && !selected.closed_at && !change"
+        v-if="
+          !historyView && selected.can_edit && !selected.closed_at && !change
+        "
         @click="
           change = {
             ...selected,
@@ -617,11 +701,14 @@ onMounted(() =>
           }
         "
         >调整期限 / 责任人</el-button
-      ><el-button v-if="selected.can_transfer" @click="run(openTransfer)"
+      ><el-button
+        v-if="!historyView && selected.can_transfer"
+        @click="run(openTransfer)"
         >移交派发人</el-button
       >
       <el-button
         v-if="
+          !historyView &&
           selected.can_withdraw &&
           !selected.source_meeting_id &&
           !selected.closed_at
@@ -744,6 +831,16 @@ onMounted(() =>
 </template>
 
 <style scoped>
+.task-view-switch {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  margin-bottom: 16px;
+}
+.task-view-switch p {
+  margin: 0;
+}
 .task-detail-heading {
   display: flex;
   flex-direction: column;

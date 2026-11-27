@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { chineseError } from "../errorMessages";
 import { ref, computed, onMounted } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
@@ -45,7 +46,7 @@ async function loadSyncHistory(background = false) {
     );
     syncHistoryLoaded.value = true;
   } catch (error: any) {
-    syncHistoryError.value = error.message || "同步记录加载失败，请重试";
+    syncHistoryError.value = chineseError(error, "同步记录加载失败，请重试");
   } finally {
     syncHistoryLoading.value = false;
   }
@@ -269,7 +270,9 @@ onMounted(() => run(load));
           }}
         </p>
         <p v-if="operations?.last_error" class="error-text">
-          {{ operations.last_error }}
+          {{
+            chineseError(operations.last_error, "后台处理失败，请查看操作日志")
+          }}
         </p>
         <p v-if="operations?.last_sent_at" class="muted">
           最近收到告警接收确认：{{ beijingTime(operations.last_sent_at) }}
@@ -398,7 +401,12 @@ onMounted(() => run(load));
                   (item: any) => !item.authorized,
                 )"
                 :key="permission.scope"
-                :title="permission.error || `${permission.scope}权限尚未就绪`"
+                :title="
+                  chineseError(
+                    permission.error,
+                    `${permission.scope}权限尚未就绪`,
+                  )
+                "
                 type="warning"
                 :closable="false"
                 show-icon
@@ -735,11 +743,13 @@ onMounted(() => run(load));
             prop="attempts"
             label="尝试次数"
             width="90"
-          /><el-table-column
-            prop="last_error"
-            label="原因"
-            min-width="230"
-          /><el-table-column label="操作" width="150"
+          /><el-table-column label="原因" min-width="230"
+            ><template #default="{ row }">{{
+              row.last_error
+                ? chineseError(row.last_error, "处理失败，请查看操作日志")
+                : "—"
+            }}</template></el-table-column
+          ><el-table-column label="操作" width="150"
             ><template #default="{ row }"
               ><el-button
                 v-if="['failed', 'blocked'].includes(row.state)"

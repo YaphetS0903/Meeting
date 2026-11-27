@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { chineseError } from "../errorMessages";
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { ElMessage } from "element-plus";
 import {
@@ -185,7 +186,7 @@ async function copyImage() {
   } catch (error) {
     if (current === generation)
       ElMessage.error(
-        (error as Error).message || "图片生成失败，请重新点击复制图片。",
+        chineseError(error, "图片生成失败，请重新点击复制图片。"),
       );
   } finally {
     if (current === generation) copying.value = false;

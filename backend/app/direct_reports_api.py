@@ -1,4 +1,5 @@
 from datetime import date
+from typing import Literal
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Query, Response
@@ -8,7 +9,7 @@ from app.core.db import get_db
 from app.core.security import current_user
 from app.models import User
 from app.services.direct_reporting import direct_report, export_direct_report
-from app.services.performance_reporting import export_performance_report, performance_report
+from app.services.performance_reporting import export_performance_report, performance_meeting_report, performance_report
 from app.services.report_access import report_export_access
 
 router = APIRouter(prefix="/api/reports", tags=["reports"])
@@ -47,6 +48,25 @@ def performance_statistics(
     db: Session = Depends(get_db), user: User = Depends(current_user),
 ):
     return performance_report(db, user, start, end, department_id, person_id)
+
+
+@router.get("/performance/details")
+def performance_details(
+    start: date, end: date, person_id: str, department_id: str | None = None,
+    source: Literal["regular", "direct"] = "regular",
+    status: Literal["已完成", "未完成", "未到期", "不统计", "已关闭"] | None = None,
+    offset: int = Query(0, ge=0), limit: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db), user: User = Depends(current_user),
+):
+    if source == "direct":
+        return direct_report(
+            db, user, start, end, department_id, person_id, status,
+            details_only=True, offset=offset, limit=limit, performance_details=True,
+        )
+    return performance_meeting_report(
+        db, user, start, end, department_id, person_id,
+        status="关闭" if status == "已关闭" else status, details_only=True, offset=offset, limit=limit,
+    )
 
 
 @router.get("/performance/export")

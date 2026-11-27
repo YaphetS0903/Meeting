@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { chineseError } from "../errorMessages";
 import { computed, ref, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { api, run } from "../api";
@@ -89,7 +90,7 @@ async function load() {
         result.pending_attempt?.todo_id || savedBinding()?.todo_id || "";
     }
   } catch (e: any) {
-    if (current === generation) error.value = e.message;
+    if (current === generation) error.value = chineseError(e);
   }
 }
 function savedBinding(): any {
@@ -109,7 +110,10 @@ async function create() {
       ElMessage.success(result.message);
     await load();
     if (result.state !== "created" && result.state !== "linked")
-      error.value = result.message;
+      error.value = chineseError(
+        result.message,
+        "企业微信待办操作失败，请稍后重试",
+      );
   } finally {
     busy.value = false;
   }
@@ -131,7 +135,7 @@ async function recover() {
     error.value = "";
     ElMessage.success("原生待办已恢复关联");
   } catch (e: any) {
-    error.value = e.message;
+    error.value = chineseError(e);
   } finally {
     busy.value = false;
   }

@@ -1,3 +1,8 @@
+import {
+  chineseError,
+  reportClientError,
+  responseMessage,
+} from "./errorMessages";
 import { reactive } from "vue";
 import { ElMessage } from "element-plus";
 import { affectsMeetingLists, announceMeetingChange } from "./meetingListSync";
@@ -10,7 +15,7 @@ export function importIssueMessage(issue: { message?: string }) {
   const message = issue.message || "需要检查原文件";
   if (/BOF not workbook\/worksheet.*strm=0x0*6\b/i.test(message))
     return "原文件中的这个页是内部模块，不是普通会议工作表，系统无法读取它。其他已识别的工作表不受影响；请核对原件，如这页没有会议内容，可在历史导入页记录检查结果。";
-  return message;
+  return chineseError(message, "无法识别该内容，请检查原文件");
 }
 export const kinds = { department: "部门例会", special: "专项会议" };
 export function clientId() {
@@ -47,24 +52,49 @@ function expireSession(status: number) {
     state.me = null;
   }
 }
-async function responseError(res: Response, fallback: string) {
-  expireSession(res.status);
-  let detail: any;
+async function responseError(
+  res: Response,
+  fallback: string,
+  path: string,
+  method: string,
+) {
+  let detail: unknown;
   try {
     const text = await res.text();
     detail = text.trim() ? JSON.parse(text).detail : null;
   } catch {
-    // Gateways can return HTML, an empty body, or a truncated error document.
+    // A proxy may return an empty body or an HTML error page.
   }
-  const message = detail
-    ? typeof detail === "string"
-      ? detail
-      : JSON.stringify(detail)
-    : res.status === 401
-      ? "登录已过期，请重新登录"
-      : `${fallback}（HTTP ${res.status}），请稍后重试`;
-  return new ApiResponseError(message);
+  if (!detail && res.status >= 500)
+    reportClientError("gateway", path, method, res.status);
+  expireSession(res.status);
+  return new ApiResponseError(responseMessage(detail, res.status, fallback));
 }
+
+async function request(
+  path: string,
+  init: RequestInit = {},
+  outcomeUnknown = false,
+) {
+  try {
+    const headers = new Headers(init.headers);
+    headers.set("X-Client-Page", window.location.pathname);
+    return await fetch("/api" + path, { ...init, headers });
+  } catch {
+    reportClientError(
+      outcomeUnknown ? "network_write" : "network",
+      path,
+      init.method || "GET",
+    );
+    throw new ApiResponseError(
+      outcomeUnknown
+        ? "网络连接中断，操作结果尚未确认，请先核对结果再重试"
+        : "网络连接中断，请稍后重试",
+      outcomeUnknown,
+    );
+  }
+}
+
 export async function api(
   path: string,
   method = "GET",
@@ -79,9 +109,9 @@ export async function api(
   const mutating = !["GET", "HEAD"].includes(method.toUpperCase());
   if (options.background === true && method.toUpperCase() === "GET")
     headers["X-Operation-Context"] = "background";
-  let res: Response;
-  try {
-    res = await fetch("/api" + path, {
+  const res = await request(
+    path,
+    {
       method,
       headers,
       cache: mutating ? undefined : "no-store",
@@ -91,17 +121,11 @@ export async function api(
           : body
             ? JSON.stringify(body)
             : undefined,
-    });
-  } catch {
-    throw new ApiResponseError(
-      mutating
-        ? "网络连接中断，操作结果尚未确认，请先核对结果再重试"
-        : "网络连接中断，请稍后重试",
-      mutating,
-    );
-  }
+    },
+    mutating,
+  );
   if (!res.ok) {
-    const error = await responseError(res, "服务器处理失败");
+    const error = await responseError(res, "服务器处理失败", path, method);
     error.outcomeUnknown = mutating && res.status >= 500;
     throw error;
   }
@@ -112,6 +136,7 @@ export async function api(
     if (!text.trim()) throw new Error("empty response");
     return JSON.parse(text);
   } catch {
+    reportClientError(mutating ? "response_write" : "response", path, method);
     throw new ApiResponseError(
       mutating
         ? "服务器未返回完整数据，操作结果尚未确认，请先核对结果再重试"
@@ -125,7 +150,8 @@ export async function run(fn: () => Promise<any>) {
     return await fn();
   } catch (e: any) {
     if (e === "cancel" || e === "close") return null;
-    ElMessage.error({ message: e.message, duration: 6500 });
+    if (!(e instanceof ApiResponseError)) reportClientError("browser");
+    ElMessage.error({ message: chineseError(e), duration: 6500 });
     return null;
   }
 }
@@ -155,10 +181,10 @@ export async function loadSession() {
   state.me = me;
 }
 export async function download(path: string, name: string) {
-  const res = await fetch("/api" + path, {
+  const res = await request(path, {
     headers: { Authorization: `Bearer ${sessionStorage.getItem("token")}` },
   });
-  if (!res.ok) throw await responseError(res, "下载失败");
+  if (!res.ok) throw await responseError(res, "下载失败", path, "GET");
   const url = URL.createObjectURL(await res.blob());
   const a = document.createElement("a");
   a.href = url;
@@ -171,7 +197,8 @@ export async function previewFile(
   version: number,
   format = "pdf",
 ) {
-  const res = await fetch(`/api/meetings/${meetingId}/preview`, {
+  const path = `/meetings/${meetingId}/preview`;
+  const res = await request(path, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${sessionStorage.getItem("token")}`,
@@ -179,9 +206,12 @@ export async function previewFile(
     },
     body: JSON.stringify({ expected_version: version, format }),
   });
-  if (!res.ok) throw await responseError(res, "预览生成失败");
+  if (!res.ok) throw await responseError(res, "预览生成失败", path, "POST");
   const blob = await res.blob();
-  if (!blob.size) throw new Error("预览服务返回空文件，请重新生成预览");
+  if (!blob.size) {
+    reportClientError("response", path, "POST");
+    throw new ApiResponseError("预览服务返回空文件，请重新生成预览");
+  }
   return blob;
 }
 export const person = (id: string) =>
@@ -204,6 +234,8 @@ export function departmentPath(
 }
 export const rate = (value: number | null) =>
   value == null ? "—" : `${(value * 100).toFixed(1)}%`;
+export const isLowReportRate = (value: number | null) =>
+  value != null && value < 0.8;
 export function localDate(value = new Date()) {
   return new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Shanghai" }).format(
     value,

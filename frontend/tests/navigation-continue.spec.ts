@@ -326,12 +326,97 @@ test("直接打开会议详情也能逐级返回系列与首页，不返回外�
   clean(control);
 });
 
+for (const width of [1366, 390]) {
+  test(`新建会议先收集基本信息和参会人员，取消不会创建草稿 ${width}px`, async ({
+    page,
+  }, testInfo) => {
+    const control = await fixture(page);
+    const activeUser = {
+      id: "attendee",
+      name: "测试参会人员",
+      active: true,
+      department_id: "navigation-department",
+    };
+    await page.route("**/api/meeting-people?*", (route) =>
+      route.fulfill({
+        json: {
+          users: [activeUser],
+          departments: [{ id: activeUser.department_id, name: "测试部门" }],
+        },
+      }),
+    );
+    const reports: any[] = [];
+    await page.route("**/api/client-errors", (route) => {
+      reports.push(route.request().postDataJSON());
+      return route.fulfill({ status: 204 });
+    });
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto(seriesUrl);
+    const open = () =>
+      page.getByRole("button", { name: "＋ 新建会议", exact: true }).click();
+    await open();
+    const dialog = page.getByRole("dialog", { name: "新建会议", exact: true });
+    const title = dialog.getByRole("textbox", {
+      name: "会议名称",
+      exact: true,
+    });
+    const confirm = dialog.getByRole("button", {
+      name: "确认并填写任务单",
+      exact: true,
+    });
+    await confirm.click();
+    await expect(
+      dialog.getByText("请填写会议名称", { exact: true }),
+    ).toBeVisible();
+    await expect(title).toBeFocused();
+    await expect.poll(() => reports[0]?.code).toBe("setup_title");
+    expect(reports[0].page).toBe("/meetings/new");
+    await title.fill("本地新建验证");
+    await dialog.getByRole("button", { name: "取消", exact: true }).click();
+    await expect(page).toHaveURL(
+      (url) =>
+        url.pathname === "/meetings" &&
+        url.searchParams.get("series") === series,
+    );
+    expect(control.writes).toEqual([]);
+    await open();
+    await expect(title).toHaveValue("");
+    await title.fill("本地新建验证");
+    await dialog
+      .getByRole("combobox", { name: "线上参会人员", exact: true })
+      .fill("测试参会");
+    await page
+      .getByRole("option", { name: "测试参会人员", exact: true })
+      .click();
+    await expect(dialog.getByText("共 2 人", { exact: true })).toBeVisible();
+    await page.screenshot({
+      path: testInfo.outputPath(`new-meeting-${width}.png`),
+      animations: "disabled",
+    });
+    await confirm.click();
+    await expect(dialog).toHaveCount(0);
+    await expect(page.locator(".meeting-info-card").first()).toContainText(
+      "本地新建验证",
+    );
+    await expect(page.locator(".attendee-card")).toContainText("测试参会人员");
+    expect(control.writes).toEqual([]);
+    clean(control);
+  });
+}
+
 test("返回沿用会议未保存保护，取消离开保留输入，确认后才离开", async ({
   page,
 }) => {
   const control = await fixture(page);
   await page.goto(seriesUrl);
   await page.getByRole("button", { name: "＋ 新建会议", exact: true }).click();
+  await page
+    .getByRole("dialog", { name: "新建会议", exact: true })
+    .getByRole("textbox", { name: "会议名称", exact: true })
+    .fill("测试会议");
+  await page
+    .getByRole("button", { name: "确认并填写任务单", exact: true })
+    .click();
   await page.getByRole("button", { name: "＋ 新增工作", exact: true }).click();
   const content = page.getByRole("textbox", {
     name: "工作内容及要求",

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { chineseError } from "../errorMessages";
 import { computed, onMounted, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { api, state, departmentPath } from "../api";
@@ -24,7 +25,7 @@ async function showMembers(role: any) {
   try {
     members.value = await api(`/admin/roles/${role.id}/members`);
   } catch (e: any) {
-    membersError.value = e.message || "成员读取失败";
+    membersError.value = chineseError(e, "成员读取失败");
   } finally {
     membersLoading.value = false;
   }
@@ -50,7 +51,7 @@ async function load() {
       api("/admin/role-catalog", "GET", undefined, { background: true }),
     ]);
   } catch (e: any) {
-    error.value = e.message || "角色读取失败，请重试";
+    error.value = chineseError(e, "角色读取失败，请重试");
   } finally {
     loading.value = false;
   }
@@ -124,7 +125,7 @@ async function removeRole(role: any) {
     if (memberRole.value?.id === role.id) memberRole.value = null;
     ElMessage.success("角色已删除，相关角色分配已撤销");
   } catch (e: any) {
-    ElMessage.error(e.message || "删除失败，请重试");
+    ElMessage.error(chineseError(e, "删除失败，请重试"));
     await load();
   } finally {
     deleting.value = null;
@@ -164,7 +165,7 @@ async function save() {
     opened.value = false;
     ElMessage.success("角色已保存，已分配员工的权限同步生效");
   } catch (e: any) {
-    saveError.value = e.message || "保存失败，请重试";
+    saveError.value = chineseError(e, "保存失败，请重试");
   } finally {
     saving.value = false;
   }

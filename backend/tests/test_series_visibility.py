@@ -130,3 +130,59 @@ def test_creating_series_without_primary_department_requires_an_existing_members
     assert response.status_code == (200 if membership else 403), response.text
     if membership:
         assert response.json()["department_id"] == team["dep"].id
+
+
+
+def test_employee_can_start_new_series_but_needs_approval_to_continue(client, team, draft_factory):
+    creator = team["a"]
+    applicant = team["b"]
+    creator_headers, applicant_headers = auth(creator), auth(applicant)
+    series = client.post("/api/series", headers=creator_headers, json={"name": "新系列"}).json()
+    series_id = series["id"]
+    assert series["can_start_meeting"]
+    duplicate = client.post("/api/series", headers=applicant_headers, json={"name": "新系列"}).json()
+    assert duplicate["id"] == series_id and duplicate["existing"] and not duplicate["can_start_meeting"]
+
+    draft = draft_factory().model_dump(mode="json")
+    draft.update(series_id=series_id, host_id=applicant.id, recorder_id=applicant.id)
+    assert client.post("/api/meetings", json=draft, headers=applicant_headers).status_code == 403
+
+    draft.update(host_id=creator.id, recorder_id=creator.id, attendee_ids=[applicant.id])
+    first = client.post("/api/meetings", json=draft, headers=creator_headers)
+    assert first.status_code == 200, first.text
+    first_id = first.json()["id"]
+    assert client.post("/api/meetings", json=draft, headers=creator_headers).status_code == 403
+    key = {"series_key": f"series:{series_id}", "q": "不会匹配"}
+    assert not client.get("/api/meetings", headers=creator_headers, params=key).json()["can_start_meeting"]
+    published = client.post(f"/api/meetings/{first_id}/publish", headers=creator_headers, json={
+        "expected_version": 1, "notify": False,
+    })
+    assert published.status_code == 200, published.text
+
+    standalone = {**draft, "series_id": None, "host_id": applicant.id, "recorder_id": applicant.id}
+    created = client.post("/api/meetings", json=standalone, headers=applicant_headers)
+    assert created.status_code == 200, created.text
+    own_id = created.json()["id"]
+    assert client.put(f"/api/meetings/{own_id}", headers=applicant_headers, json={
+        "draft": {**standalone, "series_id": series_id}, "expected_version": 1,
+    }).status_code == 403
+    assert client.put(f"/api/meetings/{own_id}/archive-series", headers=applicant_headers, json={
+        "series_id": series_id, "expected_draft_version": 1,
+    }).status_code == 403
+
+    source = f"/api/meetings/{first_id}"
+    assert client.get(source, headers=applicant_headers).json()["can_request_continue"]
+    assert client.post(source + "/continue", headers=applicant_headers).status_code == 403
+    requested = client.post(source + "/edit-requests", headers=applicant_headers)
+    assert requested.status_code == 200, requested.text
+    assert client.post(source + "/continue", headers=applicant_headers).status_code == 403
+    request_id = requested.json()["id"]
+    accepted = client.post(source + f"/edit-requests/{request_id}/decision", headers=creator_headers, json={
+        "decision": "approved",
+    })
+    assert accepted.status_code == 200, accepted.text
+    assert client.get(source, headers=applicant_headers).json()["can_continue"]
+    next_meeting = client.post(source + "/continue", headers=applicant_headers)
+    assert next_meeting.status_code == 200, next_meeting.text
+    assert next_meeting.json()["series_id"] == series_id
+    assert next_meeting.json()["recorder_id"] == applicant.id

@@ -249,3 +249,70 @@ test("新建系列后的重新加载都标为后台，手动查询仍记为主�
   ).toBe(false);
   expect(control.errors).toEqual([]);
 });
+
+for (const width of [1366, 390]) {
+  test(`管理员可以按标签查看系统错误与排查信息 ${width}px`, async ({
+    page,
+  }, testInfo) => {
+    await setup(page);
+    await page.setViewportSize({ width, height: 900 });
+    await page.route("**/api/me", (route) =>
+      route.fulfill({
+        json: {
+          id: "admin",
+          name: "系统管理员",
+          username: "admin",
+          is_admin: true,
+          active: true,
+          can_view_operation_logs: true,
+        },
+      }),
+    );
+    const entry = {
+      id: "error-1",
+      actor_name: "示例员工",
+      actor_username: "employee1",
+      operation: "保存会议草稿",
+      target: "会议",
+      summary: "请填写会议名称后再保存草稿",
+      created_at: "2026-11-25T06:30:00Z",
+      result: "failed",
+      context: {
+        error_source: "服务端",
+        method: "POST",
+        path: "/api/meetings",
+        page: "/meetings/new",
+        http_status: 422,
+      },
+    };
+    await page.route("**/api/admin/operation-logs*", (route) => {
+      const url = new URL(route.request().url());
+      const items = url.searchParams.get("view") === "errors" ? [entry] : [];
+      return route.fulfill({
+        json: {
+          items,
+          total: items.length,
+          categories: { meeting: "会议与任务单" },
+        },
+      });
+    });
+    await page.route("**/api/admin/operation-logs/error-1", (route) =>
+      route.fulfill({ json: entry }),
+    );
+    await page.goto("/operation-logs");
+    await page.getByText("系统错误日志", { exact: true }).click();
+    await expect(
+      page.getByText("请填写会议名称后再保存草稿", { exact: true }),
+    ).toBeVisible();
+    await page.getByRole("button", { name: "查看保存会议草稿详情" }).click();
+    const detail = page.getByRole("dialog", { name: "错误详情" });
+    await expect(
+      detail.getByText("POST /api/meetings", { exact: true }),
+    ).toBeVisible();
+    await expect(detail.getByText("422", { exact: true })).toBeVisible();
+    await page.screenshot({
+      path: testInfo.outputPath(`error-log-${width}.png`),
+      animations: "disabled",
+    });
+  });
+}

@@ -208,7 +208,7 @@ async function fixture(
     }
     return route.fulfill({ json: body });
   });
-  await page.goto("/reports");
+  await page.goto("/reports?view=regular");
   await expect
     .poll(() => requests.some((r) => r.pathname === "/api/reports"))
     .toBe(true);

@@ -1,18 +1,21 @@
 import { expect, test, type Page } from "@playwright/test";
 import { fileURLToPath } from "node:url";
 
-const evidence = fileURLToPath(
-  new URL(
-    "../../../.validation/latest-import-current-20261113/",
-    import.meta.url,
-  ),
-);
+const evidence =
+  process.env.SERIES_TEST_EVIDENCE_DIR ||
+  fileURLToPath(
+    new URL(
+      "../../../.validation/latest-import-current-20261113/",
+      import.meta.url,
+    ),
+  );
 
-async function setup(page: Page) {
+async function setup(page: Page, isAdmin = true) {
   const me = {
     id: "admin",
     name: "系统管理员",
-    is_admin: true,
+    is_admin: isAdmin,
+    business_permissions: isAdmin ? undefined : {},
     active: true,
     department_id: "dep",
   };
@@ -77,7 +80,9 @@ async function setup(page: Page) {
     } else if (path === "/api/meetings") {
       control.reads.push(url);
       const items =
-        control.duplicate && url.searchParams.get("view") === "current"
+        (control.duplicate ||
+          (!isAdmin && url.searchParams.get("series_key") === "series:old")) &&
+        url.searchParams.get("view") === "current"
           ? [
               {
                 id: "historical",
@@ -85,13 +90,33 @@ async function setup(page: Page) {
                 meeting_date: "2026-11-09",
                 historical: true,
                 published_version: 1,
+                series_id: "old",
+                can_request_continue: !isAdmin,
                 department_id: "dep",
                 host_name: "侯琰",
                 item_count: 18,
               },
             ]
           : [];
-      body = { items, total: items.length };
+      body = {
+        items,
+        total: items.length,
+        can_start_meeting:
+          isAdmin || url.searchParams.get("series_key") === "series:new",
+      };
+    } else if (path === "/api/meetings/historical" && !isAdmin) {
+      body = {
+        id: "historical",
+        title: "销售一部历史周例会",
+        series_id: "old",
+        department_id: "dep",
+        published_version: 1,
+        can_request_continue: true,
+        can_edit: false,
+        versions: [],
+        draft: { items: [], attendee_ids: [], online_attendee_ids: [] },
+        attachments: [],
+      };
     } else throw new Error(`Unexpected request ${request.method()} ${path}`);
     await route.fulfill({ json: body });
   });
@@ -106,6 +131,11 @@ for (const viewport of [
     await page.setViewportSize(viewport);
     const control = await setup(page);
     await page.goto("/meetings");
+    const newMeeting = page.getByRole("button", {
+      name: "＋ 新建会议",
+      exact: true,
+    });
+    await expect(newMeeting).toHaveCount(0);
     if (viewport.width < 768)
       await page.getByRole("button", { name: /筛选会议/ }).click();
     const search = page.getByRole("textbox", {
@@ -183,26 +213,20 @@ for (const viewport of [
     expect(control.writes).toEqual([
       { name: "专项工作推进会", kind: "special", department_id: "dep" },
     ]);
-    const list = page.locator(
-      viewport.width < 768 ? ".series-mobile-list" : ".series-archive-table",
-    );
+    await expect(page).toHaveURL(/\/meetings\?series=series(?::|%3A)new$/);
     await expect(
-      list.getByText("专项会议", { exact: viewport.width >= 768 }),
+      page.getByRole("heading", { name: /专项工作推进会/ }),
     ).toBeVisible();
+    await newMeeting.click();
+    await expect(page).toHaveURL(/\/meetings\/new\?series=series(?::|%3A)new$/);
+    const setupDialog = page.getByRole("dialog", {
+      name: "新建会议",
+      exact: true,
+    });
+    await expect(setupDialog).toBeVisible();
     await expect(
-      list.getByRole("button", {
-        name: /^专项工作推进会/,
-        exact: viewport.width >= 768,
-      }),
+      setupDialog.getByText("专项会议", { exact: true }),
     ).toBeVisible();
-    await page.goto("/meetings/new?series=series:new");
-    await expect(
-      page.getByRole("heading", { name: "在线会议编辑" }),
-    ).toBeVisible();
-    await expect(
-      page.getByText("专项会议", { exact: true }).first(),
-    ).toBeVisible();
-    await page.getByRole("button", { name: "编辑", exact: true }).click();
     await expect(
       page.getByRole("combobox", { name: "会议类型", exact: true }),
     ).toBeDisabled();
@@ -311,7 +335,7 @@ for (const width of [1366, 390]) {
     await dialog.getByRole("button", { name: "确定", exact: true }).click();
     await expect(page).toHaveURL(/series=series(?::|%3A)old/);
     await expect(
-      page.getByText("已进入已有会议系列，可查看历史会议或添加会议", {
+      page.getByText("已进入已有会议系列", {
         exact: true,
       }),
     ).toBeVisible();
@@ -363,10 +387,49 @@ test("同名不同部门的新系列不会被误判为已存在", async ({ page 
     .getByRole("textbox", { name: "会议系列名称", exact: true })
     .fill("采购周会");
   await dialog.getByRole("button", { name: "确定", exact: true }).click();
-  await expect(
-    page.getByText("会议系列已建立，点击它可添加会议", { exact: true }),
-  ).toBeVisible();
-  await expect(page).toHaveURL(/\/meetings$/);
+  await expect(page.getByText("会议系列已建立", { exact: true })).toBeVisible();
+  await expect(page).toHaveURL(/\/meetings\?series=series(?::|%3A)new$/);
   expect(control.series).toHaveLength(2);
+  expect(control.errors).toEqual([]);
+});
+
+test("员工先建系列再新建首场会议，已有系列进入接续申请", async ({ page }) => {
+  const control = await setup(page, false);
+  await page.goto("/meetings");
+  const newMeeting = page.getByRole("button", {
+    name: "＋ 新建会议",
+    exact: true,
+  });
+  await expect(newMeeting).toHaveCount(0);
+  await page
+    .getByRole("button", { name: "＋ 新建会议系列", exact: true })
+    .click();
+  const dialog = page.getByRole("dialog", { name: "新建会议系列" });
+  await dialog
+    .getByRole("textbox", { name: "会议系列名称" })
+    .fill("员工新建周会");
+  await dialog.getByRole("button", { name: "确定", exact: true }).click();
+  await expect(page).toHaveURL(/\/meetings\?series=series(?::|%3A)new$/);
+  await expect(
+    page.getByRole("heading", { name: /员工新建周会/ }),
+  ).toBeVisible();
+  await newMeeting.click();
+  await expect(page).toHaveURL(/\/meetings\/new\?series=series(?::|%3A)new/);
+
+  await page.goto("/meetings?series=series%3Aold");
+  await expect(newMeeting).toHaveCount(0);
+  await page
+    .getByRole("button", { name: "申请接续权限", exact: true })
+    .filter({ visible: true })
+    .first()
+    .click();
+  await expect(page).toHaveURL(/\/meetings\/historical.*request=continue/);
+  await page.getByRole("button", { name: "申请接续权限", exact: true }).click();
+  const requestDialog = page.getByRole("dialog", { name: "申请接续权限" });
+  await expect(requestDialog).toBeVisible();
+  await expect(requestDialog.getByText(/主持人审批通过后/)).toBeVisible();
+  await expect(
+    requestDialog.getByRole("button", { name: "确定申请" }),
+  ).toBeVisible();
   expect(control.errors).toEqual([]);
 });

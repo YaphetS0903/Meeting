@@ -91,7 +91,7 @@ async function fixture(page: Page, mode = "all") {
     }
     await route.fulfill({ json: body });
   });
-  await page.goto("/reports");
+  await page.goto("/reports?view=regular");
   await expect.poll(() => requests.length).toBe(1);
   return { requests, exports, errors };
 }

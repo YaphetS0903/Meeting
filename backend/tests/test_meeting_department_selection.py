@@ -4,7 +4,7 @@ from tests.role_helpers import report_grant, grant as new_grant, DEFINITIONS
 import pytest
 from sqlalchemy import select
 
-from app.models import EmployeeRoleGrant, MeetingSeries, Task
+from app.models import EmployeeRoleGrant, Task
 from app.schemas import MeetingDraft, PublishRequest
 from app.services.access import direct_assignees
 from app.services.business import continue_meeting, create_meeting, publish, revision, save_meeting
@@ -19,16 +19,13 @@ def test_personally_responsible_employee_can_create_and_publish_in_another_depar
     db, team, client, draft_factory, responsibility,
 ):
     actor = team["colleague"]
-    series = MeetingSeries(name="跨部门记录周会", department_id=team["other"].id)
-    db.add(series)
-    db.flush()
     options = client.get("/api/meeting-people", headers=auth(actor)).json()
     assert {d["id"] for d in options["departments"]} == {team["dep"].id, team["other"].id}
     # The global meeting selector does not expand the ordinary directory.
     directory = client.get("/api/directory", headers=auth(actor)).json()
     assert team["other"].id not in {d["id"] for d in directory["departments"]}
     draft = draft_factory()
-    draft.department_id, draft.series_id = team["other"].id, series.id
+    draft.department_id, draft.series_id = team["other"].id, None
     draft.host_id = actor.id if responsibility == "host" else team["outsider"].id
     draft.recorder_id = actor.id if responsibility == "recorder" else None
     draft.items[0].owner_ids = [team["outsider"].id]

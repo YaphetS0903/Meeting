@@ -1,6 +1,8 @@
 <script setup lang="ts">
+import { chineseError } from "../errorMessages";
 import { ref, computed, watch } from "vue";
-import { api, state, query, run, rate, download, statuses } from "../api";
+import { useRoute, useRouter } from "vue-router";
+import { api, state, query, run, download, statuses } from "../api";
 import {
   reportDepartmentOptions,
   reportDepartmentScope,
@@ -8,6 +10,8 @@ import {
 } from "../reportDepartments";
 import PeopleSelect from "../components/PeopleSelect.vue";
 import PeriodFilter from "../components/PeriodFilter.vue";
+import ReportRateMeter from "../components/ReportRateMeter.vue";
+import ReportOverview from "../components/ReportOverview.vue";
 import StatusTag from "../components/StatusTag.vue";
 import DirectTaskReports from "../components/DirectTaskReports.vue";
 import PerformanceReports from "../components/PerformanceReports.vue";
@@ -34,16 +38,28 @@ const detailItems = ref<any[]>([]),
 const detailKind = ref<"review" | "new">("review");
 let detailGeneration = 0;
 const access = ref<any>(null);
-const reportMode = ref("regular");
-const directOnly = computed(() => reportMode.value === "direct");
-const performanceOnly = computed(() => reportMode.value === "performance");
-const seniorOnly = computed(() => reportMode.value === "senior");
+const route = useRoute();
+const router = useRouter();
+const meetingScope = ref("regular");
 const primaryReportMode = computed({
-  get: () => (seniorOnly.value ? "regular" : reportMode.value),
-  set: (value: string) => {
-    reportMode.value = value;
+  get: () => {
+    const view = route.query.view;
+    return view === "regular" || view === "direct" ? view : "performance";
+  },
+  set: (view: string) => {
+    void router.replace({
+      query: {
+        ...route.query,
+        view: view === "performance" ? undefined : view,
+      },
+    });
   },
 });
+const directOnly = computed(() => primaryReportMode.value === "direct");
+const performanceOnly = computed(
+  () => primaryReportMode.value === "performance",
+);
+const seniorOnly = computed(() => meetingScope.value === "senior");
 const canViewSenior = computed(() => !!access.value?.can_view_senior_meetings);
 const canViewOthers = computed(
   () => access.value?.mode === "all" || access.value?.mode === "departments",
@@ -136,7 +152,7 @@ async function load() {
     loadedParams.value = requested;
   } catch (error: any) {
     if (activeGeneration === generation)
-      loadError.value = error.message || "服务暂时不可用";
+      loadError.value = chineseError(error, "服务暂时不可用");
     throw error;
   } finally {
     if (activeGeneration === generation) busy.value = false;
@@ -186,19 +202,23 @@ function departmentChanged() {
   selectedTopic.value = "";
   run(load);
 }
-function modeChanged() {
-  if (directOnly.value || performanceOnly.value) {
-    generation++;
-    detailGeneration++;
-    detailsVisible.value = meetingsVisible.value = false;
-    data.value = loadedParams.value = null;
-    busy.value = false;
-    loadError.value = "";
-    return;
-  }
+watch(primaryReportMode, () => {
+  generation++;
+  detailGeneration++;
+  detailsVisible.value = meetingsVisible.value = false;
+  data.value = loadedParams.value = null;
+  busy.value = false;
+  loadError.value = "";
+  meetingScope.value = "regular";
+  resetMeetingFilters();
+});
+function resetMeetingFilters() {
   department.value = selectedTopic.value = "";
   selectedLeader.value = "";
   selectedPerson.value = null;
+}
+function meetingScopeChanged() {
+  resetMeetingFilters();
   run(load);
 }
 async function loadDetails() {
@@ -232,7 +252,7 @@ async function loadDetails() {
       detailKind.value === "new" ? result.total : result.details_total;
   } catch (error: any) {
     if (ticket === detailGeneration)
-      detailError.value = error.message || "明细读取失败，请重试";
+      detailError.value = chineseError(error, "明细读取失败，请重试");
   } finally {
     if (ticket === detailGeneration) detailBusy.value = false;
   }
@@ -297,7 +317,6 @@ function showDetails(
       v-model="primaryReportMode"
       class="report-module-picker"
       aria-label="统计模块"
-      @change="modeChanged"
     >
       <el-radio-button value="performance">绩效统计</el-radio-button>
       <el-radio-button value="regular">会议纪要统计</el-radio-button>
@@ -312,10 +331,10 @@ function showDetails(
   >
     <el-radio-group
       v-if="canViewSenior"
-      v-model="reportMode"
+      v-model="meetingScope"
       class="report-meeting-scope"
       aria-label="会议统计范围"
-      @change="modeChanged"
+      @change="meetingScopeChanged"
     >
       <el-radio-button value="regular">全部会议</el-radio-button>
       <el-radio-button value="senior">中高层会议统计</el-radio-button>
@@ -402,56 +421,15 @@ function showDetails(
     style="min-height: 180px"
   />
   <div v-loading="busy" v-if="data">
-    <div v-if="canViewOthers" class="stat-grid report-stats">
-      <article class="stat">
-        <span>任务达成率</span><strong>{{ rate(data.summary.rate) }}</strong
-        ><small>已完成 ÷（已完成 + 未完成）</small>
-      </article>
-      <article class="stat">
-        <span>工作事项数</span>
-        <button
-          class="stat-value-button"
-          type="button"
-          aria-label="查看全部任务明细"
-          :aria-expanded="detailsVisible && !detailStatus && !detailPerson"
-          aria-haspopup="dialog"
-          @click="showDetails()"
-        >
-          <strong>{{ data.summary.items }}</strong>
-        </button>
-        <small>共同负责的事项按每人分别统计</small>
-      </article>
-      <article class="stat">
-        <span>已完成</span>
-        <button
-          class="stat-value-button"
-          type="button"
-          aria-label="查看已完成任务明细"
-          :aria-expanded="
-            detailsVisible && detailStatus === '已完成' && !detailPerson
-          "
-          aria-haspopup="dialog"
-          @click="showDetails('已完成')"
-        >
-          <strong>{{ data.summary.counts["已完成"] }}</strong>
-        </button>
-      </article>
-      <article class="stat">
-        <span>未完成</span>
-        <button
-          class="stat-value-button"
-          type="button"
-          aria-label="查看未完成任务明细"
-          :aria-expanded="
-            detailsVisible && detailStatus === '未完成' && !detailPerson
-          "
-          aria-haspopup="dialog"
-          @click="showDetails('未完成')"
-        >
-          <strong>{{ data.summary.counts["未完成"] }}</strong>
-        </button>
-      </article>
-    </div>
+    <ReportOverview
+      :summary="data.summary"
+      :statuses="statuses"
+      rate-label="任务达成率"
+      total-label="工作事项数"
+      task-label="任务明细"
+      rate-hint="已完成 ÷（已完成 + 未完成）。共同负责的事项按每人的结果统计。"
+      @details="showDetails($event)"
+    />
     <section id="department-people-results" class="panel report-people-results">
       <div class="panel-heading">
         <h2>
@@ -550,10 +528,10 @@ function showDetails(
             >
           </template>
         </el-table-column>
-        <el-table-column label="达成率" min-width="95" align="right">
+        <el-table-column label="达成率" min-width="160" align="right">
           <template #default="{ row }"
-            ><strong>{{ rate(row.rate) }}</strong></template
-          >
+            ><ReportRateMeter :value="row.rate"
+          /></template>
         </el-table-column>
       </el-table>
     </section>
@@ -785,26 +763,6 @@ function showDetails(
   color: var(--ink);
   font-size: 14px;
   line-height: 32px;
-}
-.stat-value-button {
-  align-self: flex-start;
-  width: fit-content;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-.stat-value-button:hover {
-  text-decoration: underline;
-  text-underline-offset: 5px;
-}
-.stat-value-button:focus-visible {
-  outline: 2px solid var(--el-color-primary);
-  outline-offset: 5px;
-  border-radius: 3px;
 }
 .report-details-content {
   --el-color-primary: #245cba;

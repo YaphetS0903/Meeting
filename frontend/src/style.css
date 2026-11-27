@@ -357,6 +357,10 @@ main#main {
   margin-bottom: 18px;
   align-items: flex-start;
 }
+.report-rate-low,
+.stat .report-rate-low {
+  color: var(--el-color-danger-dark-2);
+}
 .status-tag {
   font-size: 12px;
   background: #eaf1fb;

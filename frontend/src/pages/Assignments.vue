@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { chineseError } from "../errorMessages";
 import { computed, onMounted, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { api, clientId, run, state } from "../api";
@@ -153,7 +154,7 @@ async function load(background = false) {
     options.value = scope;
     rows.value = issued;
   } catch (error: any) {
-    loadError.value = error.message || "服务暂时不可用";
+    loadError.value = chineseError(error, "服务暂时不可用");
     rows.value = [];
     throw error;
   }
@@ -254,7 +255,7 @@ async function assign() {
       } catch (error: any) {
         nativeResult.value = {
           state: "pending",
-          message: `系统任务已派发，企微确认结果待核实：${error.message || "请稍后刷新"}`,
+          message: `系统任务已派发，企微确认结果待核实：${chineseError(error, "请稍后刷新")}`,
         };
       }
       if (nativeResult.value.state === "created")
@@ -263,7 +264,7 @@ async function assign() {
     await run(() => load(true));
   } catch (error: any) {
     if (error !== "cancel" && error !== "close")
-      formError.value = error.message || "派发失败，请检查后重试";
+      formError.value = chineseError(error, "派发失败，请检查后重试");
   } finally {
     busy.value = false;
     phase.value = "";

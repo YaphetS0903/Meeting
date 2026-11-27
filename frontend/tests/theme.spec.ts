@@ -49,6 +49,13 @@ test("统一蓝色主题覆盖主要页面并适配移动端", async ({ page }) 
     .getByRole("button", { name: "浏览器验收例会", exact: true })
     .click();
   await page.getByRole("button", { name: "＋ 新建会议", exact: true }).click();
+  await page
+    .getByRole("dialog", { name: "新建会议", exact: true })
+    .getByRole("textbox", { name: "会议名称", exact: true })
+    .fill("测试会议");
+  await page
+    .getByRole("button", { name: "确认并填写任务单", exact: true })
+    .click();
   await expect(
     page.getByRole("heading", { name: "会议基本信息", exact: true }),
   ).toBeVisible();

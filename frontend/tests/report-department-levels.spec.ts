@@ -103,7 +103,7 @@ async function mock(page: Page, admin = true) {
       return route.fulfill({ status: 404, json: { detail: "未预期请求" } });
     return route.fulfill({ json: body });
   });
-  await page.goto("/reports");
+  await page.goto("/reports?view=regular");
   await expect(
     page.getByRole("heading", { name: "统计报表", exact: true }),
   ).toBeVisible();

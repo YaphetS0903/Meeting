@@ -1,6 +1,6 @@
 from datetime import date
 
-from sqlalchemy import func, literal, select
+from sqlalchemy import case, func, literal, or_, select
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -10,6 +10,7 @@ from app.models import (
     ImportCandidate,
     ImportSource,
     Meeting,
+    Task,
     User,
     ValidationIssue,
 )
@@ -50,8 +51,6 @@ def report(
         .join(Meeting, Meeting.id == Assessment.meeting_id)
         .where(
             Meeting.published_version == Assessment.meeting_version,
-            Meeting.meeting_date >= start,
-            Meeting.meeting_date <= end,
             Assessment.user_id.not_in(access.excluded_users),
         )
     )
@@ -75,12 +74,36 @@ def report(
         query = query.where(Meeting.kind == kind)
     if senior_only:
         from app.services.senior_meetings import senior_meeting_ids
-        query = query.where(Meeting.id.in_(senior_meeting_ids(db, start, end, leader_id)))
+        query = query.where(Meeting.id.in_(senior_meeting_ids(db, leader_id=leader_id)))
     query = apply_series_key(query, series_key)
     if person_id:
         query = query.where(Assessment.user_id == person_id)
     if status:
         query = query.where(Assessment.status == status)
+    # Rank the published history across periods before applying the selected dates.
+    linked_history = (
+        select(
+            Assessment.id.label("assessment_id"),
+            func.row_number().over(
+                partition_by=(Assessment.task_id, Assessment.user_id),
+                order_by=(Meeting.meeting_date.desc(), Assessment.created_at.desc(), Assessment.id.desc()),
+            ).label("position"),
+        )
+        .join(Meeting, Meeting.id == Assessment.meeting_id)
+        .where(Assessment.task_id.is_not(None), Meeting.published_version == Assessment.meeting_version)
+    )
+    if person_id:
+        linked_history = linked_history.where(Assessment.user_id == person_id)
+    ranked = linked_history.subquery()
+    pending = Assessment.status == "未到期"
+    query = query.outerjoin(Task, Task.id == Assessment.task_id).where(or_(
+        ~pending,
+        Assessment.task_id.is_(None),
+        Assessment.id.in_(select(ranked.c.assessment_id).where(ranked.c.position == 1)),
+    ))
+    due_date = case((pending, func.coalesce(Task.due_date, Assessment.due_date)), else_=Assessment.due_date)
+    period_date = case((pending, func.coalesce(due_date, Meeting.meeting_date)), else_=Meeting.meeting_date)
+    query = query.where(period_date.between(start, end))
     departments = department_paths(db.scalars(select(Department)))
     def summary_for(filtered, *, per_person=False):
         counts = dict(db.execute(filtered.with_only_columns(Assessment.status, func.count())
@@ -152,7 +175,7 @@ def report(
     detail_query = query.order_by(Meeting.meeting_date, Meeting.id, Assessment.item_id, Assessment.id)
     if details_only:
         detail_query = detail_query.offset(offset).limit(limit)
-    entries = list(db.execute(detail_query)) if include_details or details_only else []
+    entries = list(db.execute(detail_query.add_columns(due_date))) if include_details or details_only else []
     details_total = db.scalar(select(func.count()).select_from(query.subquery())) if details_only else None
     pending, file_issues, unassigned = (0, 0, False) if senior_only or details_only else pending_quality(
         db, user, start, end, department_id, kind, group_by, person_id, series_key
@@ -201,10 +224,10 @@ def report(
                 "person_department_name": departments.get(a.person_department_id, ""),
                 "content": a.content,
                 "status": a.status,
-                "due_date": a.due_date.isoformat() if a.due_date else None,
+                "due_date": deadline.isoformat() if deadline else None,
                 "notes": a.notes,
             }
-            for a, m in entries
+            for a, m, deadline in entries
         ],
     }
 
